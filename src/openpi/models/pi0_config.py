@@ -20,6 +20,8 @@ class Pi0Config(_model.BaseModelConfig):
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
     action_expert_variant: _gemma.Variant = "gemma_300m"
+    # Square input resolution for the JAX SigLIP encoder; each patch is 14x14.
+    image_resolution: tuple[int, int] = (224, 224)
 
     # Set the model specific defaults.
     action_dim: int = 32
@@ -35,6 +37,12 @@ class Pi0Config(_model.BaseModelConfig):
     pytorch_compile_mode: str | None = "max-autotune"
 
     def __post_init__(self):
+        if (
+            len(self.image_resolution) != 2
+            or any(type(size) is not int or size <= 0 or size % 14 != 0 for size in self.image_resolution)
+            or self.image_resolution[0] != self.image_resolution[1]
+        ):
+            raise ValueError("image_resolution must be square with positive dimensions divisible by 14")
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
         if self.discrete_state_input is None:
@@ -62,7 +70,7 @@ class Pi0Config(_model.BaseModelConfig):
 
     @override
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:
-        image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
+        image_spec = jax.ShapeDtypeStruct([batch_size, *self.image_resolution, 3], jnp.float32)
         image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
 
         with at.disable_typechecking():

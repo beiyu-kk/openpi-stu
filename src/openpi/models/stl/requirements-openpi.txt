@@ -1,0 +1,18 @@
+# Tested single-image STL stack in OpenPI's existing Python 3.11 environment.
+# Install with uv pip, not uv sync; keep OpenPI's root manifest/lock unchanged.
+torch==2.7.1
+torchvision==0.22.1
+transformers==4.53.2
+tokenizers==0.21.1
+numpy==1.26.4
+Pillow==11.2.1
+peft==0.12.0
+accelerate==1.5.2
+huggingface-hub==0.32.3
+safetensors==0.5.3
+requests==2.32.3
+packaging==25.0
+
+# Optional LMDB inputs: lmdb==2.3.0, opencv-python==4.11.0.86.
+# Optional video backend: decord; single images do not import or require it.
+# FlashAttention and magi_attention are optional; SDPA needs neither.

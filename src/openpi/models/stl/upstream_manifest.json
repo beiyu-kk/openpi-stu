@@ -1,0 +1,91 @@
+{
+  "recorded_at": "2026-09-09",
+  "model_id": "nvidia/LocateAnything-3B",
+  "note": "Local snapshots have no Git revision metadata. SHA256 values identify the exact upstream files. batch_infer.py is a CLI, not part of the vendored runtime.",
+  "files": [
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/batch_infer.py",
+      "sha256": "bae753daad8e3b8fad8067edad53eccef981aaf61c68c5b9c8e0a0f8734587c4"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/configuration_locateanything.py",
+      "sha256": "d2738cc180add2b77e88b8cf2bc87ff012f23bd417a99150a033f61b0a8eb857"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/configuration_qwen2.py",
+      "sha256": "1fda5efb735cae465debd414afc673389fe731afd95c934a469faa23d3d7fdf1"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/generate_utils.py",
+      "sha256": "863187051772549928bf103b58f6176263c9b786fb19ef83fd7b2e76169fa65e"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/image_processing_locateanything.py",
+      "sha256": "5109868add766c7e244487ecfff6a6f5a4aa1497b38b385a33a969f12e23b4ec"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/mask_magi_utils.py",
+      "sha256": "646b565e38b30d58cafe30aeecf0283aee83d198ce8e57936c3488c1dc7b9276"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/mask_sdpa_utils.py",
+      "sha256": "7e9d600eb25283963cc1696da060813066b9795da467cf9fb0ca68bfc8de1e1d"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/modeling_locateanything.py",
+      "sha256": "ffe736fb8ded5d597201704ccd85134d18a8e4dea43d309228644737234b7244"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/modeling_qwen2.py",
+      "sha256": "aadb676c0a587a16b7071977c159df16299fad22d88ee8ed9754881ab7f59575"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/modeling_vit.py",
+      "sha256": "96479eb121c840f009a32830c78740154171290419108caefcf8778580700373"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/processing_locateanything.py",
+      "sha256": "682145ed054b1e912e66273b476e51a25b2d666d4a37b26385af9300b66d40d8"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/batch_utils/__init__.py",
+      "sha256": "7a0f6722cecaf13f8ae7e5ccd35c3edd9e50cc07740f6f65759d2585390e338a"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/batch_utils/engine_hybrid.py",
+      "sha256": "0e473fba43c1390ea54b9b30cf8da1f51ddac3f5e5cce5e68065675a21aaedea"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/batch_utils/hybrid_runtime.py",
+      "sha256": "c6adbe0e655ab341653c5220d794c7c735051d08f32be73f185758876f570681"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/kernel_utils/__init__.py",
+      "sha256": "96180206ba56840aef532c0a1cb702b4e28971e7eb02e6fa586a5d8ad46f7ccc"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/kernel_utils/range_attention.py",
+      "sha256": "03fbe8238fdaf500de0c33aa4bc1f258f1326cfb7d0fff884cc36d777f213802"
+    },
+    {
+      "source": "/home/ubun/project/stu_vla/locate-anything/locateanything_worker.py",
+      "sha256": "021f26b07220b9dcb090023286ef52f0a55392d0c43ec1a0490645a2c5c165a4"
+    },
+    {
+      "source": "/home/ubun/project/stu_vla/locate-anything/scripts/test_single_image.py",
+      "sha256": "78b06a65925cfd228b2558435ac6874e19c7308088032cf290f9fcff3aacb399"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/config.json",
+      "sha256": "59e6b5104f9d948db6a38f778e29f86d5c01e373f46d02008fc3070377917007"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/preprocessor_config.json",
+      "sha256": "34f0dc33b40ee26d280d7ed93614c90b1d41a68d6ccfe5a8341e274e6169f94e"
+    },
+    {
+      "source": "/media/ubun/16T/checkpoints/stuvla/locateanything/processor_config.json",
+      "sha256": "1274db3b9504d37e57ea41ba7de547194d381265c5946f6db8560f851a940992"
+    }
+  ]
+}

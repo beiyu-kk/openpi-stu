@@ -1,7 +1,10 @@
 import dataclasses
 
+import numpy as np
+import pytest
 import tyro
 
+from openpi import transforms
 from openpi.models import pi0_config
 from openpi.training import config as _config
 
@@ -38,3 +41,28 @@ def test_checkpoint_dir_override(tmp_path):
     config = _config.get_config("pi05_piper_full_finetune")
     config = dataclasses.replace(config, exp_name="test", checkpoint_dir_override=str(tmp_path))
     assert config.checkpoint_dir == tmp_path
+
+
+@pytest.mark.parametrize("name", ["pi05_piper_full_finetune", "pi05_piper_lora_finetune"])
+@pytest.mark.parametrize("size", [224, 336, 448])
+def test_piper_resolution_configs(name, size):
+    base = _config.get_config(name)
+    configured = _config.get_config(name if size == 224 else f"{name}_{size}")
+    assert base.model.image_resolution == (224, 224)
+    assert configured.model.image_resolution == (size, size)
+    assert configured.weight_loader.resize_siglip_posemb
+    assert configured.model.paligemma_variant == base.model.paligemma_variant
+    assert configured.freeze_filter == base.freeze_filter
+
+
+@pytest.mark.parametrize("pi05", [False, True])
+@pytest.mark.parametrize("size", [224, 336, 448])
+def test_model_resize_uses_config(monkeypatch, pi05, size):
+    # Tokenization is unrelated to image resizing and would download tokenizer assets.
+    monkeypatch.setattr(_config._tokenizer, "PaligemmaTokenizer", lambda *_: None)  # noqa: SLF001
+    model = pi0_config.Pi0Config(pi05=pi05, image_resolution=(size, size))
+    group = _config.ModelTransformFactory()(model)
+    resize = next(transform for transform in group.inputs if isinstance(transform, transforms.ResizeImages))
+    image = np.full((423, 628, 3), 127, dtype=np.uint8)
+    result = resize({"image": {"base_0_rgb": image, "right_wrist_0_rgb": image}})
+    assert all(value.shape == (size, size, 3) for value in result["image"].values())

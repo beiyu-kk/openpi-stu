@@ -69,7 +69,6 @@ class Args:
     gripper_release_trigger_mm: float = 45.0
     gripper_hold_mm: float = 0.0
 
-    image_size: int = 224
     log_actions: bool = False
 
 
@@ -210,18 +209,16 @@ def build_policy_observation(
     wrist_rgb: np.ndarray,
     state: np.ndarray,
     prompt: str,
-    *,
-    image_size: int,
 ) -> dict[str, Any]:
-    """Build the request keys expected by the current Piper policy."""
+    """Send original-resolution images; the policy resizes them using its training config."""
     state = np.asarray(state, dtype=np.float32)
     if state.shape != (7,):
         raise ValueError(f"Expected Piper state shape (7,), got {state.shape}.")
     if not np.all(np.isfinite(state)):
         raise ValueError("Piper state contains non-finite values.")
     return {
-        "observation/top_image": image_tools.resize_with_pad(_as_uint8_rgb(head_rgb), image_size, image_size),
-        "observation/right_wrist_image": image_tools.resize_with_pad(_as_uint8_rgb(wrist_rgb), image_size, image_size),
+        "observation/top_image": _as_uint8_rgb(head_rgb),
+        "observation/right_wrist_image": _as_uint8_rgb(wrist_rgb),
         "observation/state": state,
         "prompt": prompt,
     }
@@ -525,7 +522,6 @@ def run(args: Args) -> None:
                     wrist_rgb,
                     state,
                     args.prompt,
-                    image_size=args.image_size,
                 )
                 with prevent_keyboard_interrupt():
                     response = policy_client.infer(request_data)

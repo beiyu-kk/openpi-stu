@@ -84,6 +84,8 @@ def make_att_2d_masks(pad_masks, att_masks):
 class PI0Pytorch(nn.Module):
     def __init__(self, config):
         super().__init__()
+        if config.image_resolution != (224, 224):
+            raise ValueError("Custom image_resolution is currently supported only by the JAX pi0/pi0.5 model")
         self.config = config
         self.pi05 = config.pi05
 

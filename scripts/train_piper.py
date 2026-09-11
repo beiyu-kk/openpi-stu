@@ -16,7 +16,14 @@ else:
     import train
 
 
-CONFIGS = ("pi05_piper_full_finetune", "pi05_piper_lora_finetune")
+CONFIGS = (
+    "pi05_piper_full_finetune",
+    "pi05_piper_lora_finetune",
+    "pi05_piper_full_finetune_336",
+    "pi05_piper_lora_finetune_336",
+    "pi05_piper_full_finetune_448",
+    "pi05_piper_lora_finetune_448",
+)
 DEFAULT_BASE_MODEL = "gs://openpi-assets/checkpoints/pi05_base"
 
 
@@ -45,6 +52,12 @@ def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
     dataset_dir = _validate_dataset_dir(args.dataset_dir)
     norm_stats_dir = pathlib.Path(args.norm_stats_dir).expanduser().resolve() if args.norm_stats_dir else dataset_dir
     base_config = _config.get_config(args.config)
+    if not isinstance(base_config.weight_loader, weight_loaders.CheckpointWeightLoader):
+        raise TypeError("Piper fine-tuning requires a CheckpointWeightLoader")
+    weight_loader = dataclasses.replace(
+        base_config.weight_loader,
+        params_path=_resolve_base_params_path(args.base_model_dir),
+    )
     repo_id = args.dataset_repo_id
 
     data = dataclasses.replace(
@@ -56,7 +69,7 @@ def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
     )
     updates = {
         "data": data,
-        "weight_loader": weight_loaders.CheckpointWeightLoader(_resolve_base_params_path(args.base_model_dir)),
+        "weight_loader": weight_loader,
         "checkpoint_base_dir": args.checkpoint_base_dir,
         "checkpoint_dir_override": args.checkpoint_dir,
         "exp_name": args.exp_name,
@@ -126,6 +139,7 @@ def main() -> None:
     logging.info("Base model params: %s", config.weight_loader.params_path)
     logging.info("Checkpoint output: %s", config.checkpoint_dir)
     logging.info("Fine-tuning config: %s (batch size %d)", config.name, config.batch_size)
+    logging.info("Image resolution: %s", config.model.image_resolution)
     train.main(config)
 
 
