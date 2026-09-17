@@ -1,5 +1,6 @@
 import dataclasses
 import functools
+import json
 import logging
 import platform
 from typing import Any
@@ -142,12 +143,17 @@ def train_step(
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
     model.train()
+    guidance = getattr(config.model, "region_guidance", None)
+    region_kwargs = {}
+    if guidance is not None:
+        strength, probability = guidance.schedule(state.step, config.num_train_steps)
+        region_kwargs = {"region_strength": strength, "region_keep_probability": probability}
 
     @at.typecheck
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        chunked_loss = model.compute_loss(rng, observation, actions, train=True)
+        chunked_loss = model.compute_loss(rng, observation, actions, train=True, **region_kwargs)
         return jnp.mean(chunked_loss)
 
     train_rng = jax.random.fold_in(rng, state.step)
@@ -188,12 +194,50 @@ def train_step(
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
+    if guidance is not None:
+        info["region/strength"] = strength
+        info["region/keep_probability"] = probability
+        for camera, valid in observation.region_valid.items():
+            info[f"region/valid_fraction/{camera}"] = jnp.mean(valid.astype(jnp.float32))
     return new_state, info
+
+
+def _record_region_guidance(config: _config.TrainConfig, *, resuming: bool):
+    """Prevent an accidental switch of method or annealing horizon on resume."""
+    guidance = getattr(config.model, "region_guidance", None)
+    path = config.checkpoint_dir / "region_guidance.json"
+    if guidance is None:
+        if resuming and path.exists():
+            raise ValueError("This run used region guidance; resume it with the same guidance options")
+        return
+    settings = {
+        "version": 1,
+        "guidance": dataclasses.asdict(guidance),
+        "num_train_steps": config.num_train_steps,
+        "image_resolution": config.model.image_resolution,
+        "dataset_root": config.data.dataset_root,
+        "annotations": config.data.base_config.region_annotations_dir,
+    }
+    settings = json.loads(json.dumps(settings))
+    if resuming:
+        if not path.exists() or json.loads(path.read_text()) != settings:
+            raise ValueError("Region guidance resume settings differ; keep the original schedule and dataset")
+    else:
+        path.write_text(json.dumps(settings, indent=2) + "\n")
 
 
 def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
+    guidance = getattr(config.model, "region_guidance", None)
+    if guidance is not None:
+        from openpi.training.region_annotations import validate_annotation_source
+
+        data_config = config.data.create(config.assets_dirs, config.model)
+        if data_config.region_annotations_dir is None or data_config.dataset_root is None:
+            raise ValueError("Region guidance requires local dataset_root and region_annotations_dir")
+        verified = validate_annotation_source(data_config.region_annotations_dir, data_config.dataset_root)
+        logging.info("Region annotation source verified: %d files", verified)
 
     if config.batch_size % jax.device_count() != 0:
         raise ValueError(
@@ -215,6 +259,7 @@ def main(config: _config.TrainConfig):
         overwrite=config.overwrite,
         resume=config.resume,
     )
+    _record_region_guidance(config, resuming=resuming)
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
     data_loader = _data_loader.create_data_loader(

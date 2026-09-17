@@ -29,7 +29,7 @@ def test_piper_finetune_configs():
     assert lora.model.action_horizon == 30
     assert "lora" in lora.model.paligemma_variant
     assert "lora" in lora.model.action_expert_variant
-    assert lora.batch_size == 32
+    assert lora.batch_size == 16
     assert lora.ema_decay is None
     assert lora.data.repo_id is tyro.MISSING
     assert lora.data.dataset_root is None
@@ -48,8 +48,10 @@ def test_checkpoint_dir_override(tmp_path):
 def test_piper_resolution_configs(name, size):
     base = _config.get_config(name)
     configured = _config.get_config(name if size == 224 else f"{name}_{size}")
-    assert base.model.image_resolution == (224, 224)
-    assert configured.model.image_resolution == (size, size)
+    base_size = 448 if "lora" in name else 224
+    assert base.model.image_resolution == (base_size, base_size)
+    expected_size = base_size if size == 224 else size
+    assert configured.model.image_resolution == (expected_size, expected_size)
     assert configured.weight_loader.resize_siglip_posemb
     assert configured.model.paligemma_variant == base.model.paligemma_variant
     assert configured.freeze_filter == base.freeze_filter

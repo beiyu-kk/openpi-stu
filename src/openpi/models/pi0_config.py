@@ -8,6 +8,7 @@ from typing_extensions import override
 
 from openpi.models import model as _model
 import openpi.models.gemma as _gemma
+from openpi.models.region_guidance import RegionGuidanceConfig
 from openpi.shared import array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
 
@@ -22,6 +23,8 @@ class Pi0Config(_model.BaseModelConfig):
     action_expert_variant: _gemma.Variant = "gemma_300m"
     # Square input resolution for the JAX SigLIP encoder; each patch is 14x14.
     image_resolution: tuple[int, int] = (224, 224)
+    # Disabled by default. No extra parameters or inference inputs are introduced.
+    region_guidance: RegionGuidanceConfig | None = None
 
     # Set the model specific defaults.
     action_dim: int = 32
@@ -47,6 +50,10 @@ class Pi0Config(_model.BaseModelConfig):
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
         if self.discrete_state_input is None:
             object.__setattr__(self, "discrete_state_input", self.pi05)
+        if self.region_guidance is not None:
+            backbone = _gemma.get_config(self.paligemma_variant)
+            self.region_guidance.layer_indices(backbone.depth)
+            self.region_guidance.head_indices(backbone.num_heads)
         if self.pytorch_compile_mode is not None:
             assert self.pytorch_compile_mode in [
                 "default",

@@ -10,6 +10,7 @@ from typing_extensions import override
 from openpi.models import model as _model
 from openpi.models import pi0_config
 import openpi.models.gemma as _gemma
+import openpi.models.region_guidance as _region_guidance
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
 
@@ -68,7 +69,10 @@ class Pi0(_model.BaseModel):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
         self.image_resolution = config.image_resolution
+        self.region_guidance = config.region_guidance
         paligemma_config = _gemma.get_config(config.paligemma_variant)
+        self.region_depth = paligemma_config.depth
+        self.region_num_heads = paligemma_config.num_heads
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
         llm = nnx_bridge.ToNNX(
@@ -188,7 +192,14 @@ class Pi0(_model.BaseModel):
 
     @override
     def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: _model.Actions,
+        *,
+        train: bool = False,
+        region_strength=None,
+        region_keep_probability=None,
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(
@@ -209,8 +220,33 @@ class Pi0(_model.BaseModel):
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, ar_mask)
         positions = jnp.cumsum(input_mask, axis=1) - 1
+        region_kwargs = {}
+        if train and self.region_guidance is not None:
+            if region_strength is None or region_keep_probability is None:
+                raise ValueError("Region-guided training requires the step-dependent schedule from train_step")
+            # A folded key preserves the baseline's augmentation, noise and timestep random streams.
+            image_bias = _region_guidance.image_key_bias(
+                observation, jax.random.fold_in(rng, 731), region_strength, region_keep_probability
+            )
+            key_bias = jnp.pad(image_bias, ((0, 0), (0, input_mask.shape[1] - image_bias.shape[1])))
+            action_queries = jnp.arange(input_mask.shape[1]) >= input_mask.shape[1] - self.action_horizon
+            head_mask = (
+                jnp.zeros(self.region_num_heads, dtype=jnp.bool_)
+                .at[jnp.array(self.region_guidance.head_indices(self.region_num_heads))]
+                .set(True)
+            )
+            layer_mask = (
+                jnp.zeros(self.region_depth, dtype=jnp.bool_)
+                .at[jnp.array(self.region_guidance.layer_indices(self.region_depth))]
+                .set(True)
+            )
+            region_kwargs = {"region_bias": (key_bias, action_queries, head_mask), "region_layer_mask": layer_mask}
         (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+            [prefix_tokens, suffix_tokens],
+            mask=attn_mask,
+            positions=positions,
+            adarms_cond=[None, adarms_cond],
+            **region_kwargs,
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 

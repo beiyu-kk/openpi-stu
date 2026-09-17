@@ -62,6 +62,8 @@ class DataConfig:
     repo_id: str | None = None
     # Optional root of a local LeRobot dataset. If unset, LeRobot resolves repo_id from its cache or the Hub.
     dataset_root: str | None = None
+    # Opt-in training sidecars; the standard data flow never reads this directory.
+    region_annotations_dir: str | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.

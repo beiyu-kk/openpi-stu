@@ -5,6 +5,7 @@ import dataclasses
 import logging
 import pathlib
 
+from openpi.models.region_guidance import RegionGuidanceConfig
 from openpi.training import config as _config
 from openpi.training import weight_loaders
 
@@ -67,8 +68,33 @@ def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
         norm_stats_dir=str(norm_stats_dir),
         assets=_config.AssetsConfig(asset_id=repo_id),
     )
+    model = base_config.model
+    if getattr(args, "region_guidance", False):
+        if not isinstance(data, _config.LeRobotPiperDataConfig):
+            raise ValueError("Region guidance requires the standard Piper data transforms")
+        annotation_dir = pathlib.Path(args.region_annotations_dir or dataset_dir / "annotations").expanduser().resolve()
+        if not (annotation_dir / "all_frames.parquet").is_file():
+            raise FileNotFoundError(f"Region annotation table not found in {annotation_dir}")
+        guidance = RegionGuidanceConfig(
+            strength=args.region_bias_strength,
+            keep_probability=args.region_keep_probability,
+            decay_start=args.region_decay_start,
+            decay_end=args.region_decay_end,
+            layers=None if args.region_layers is None else tuple(args.region_layers),
+            heads=None if args.region_heads is None else tuple(args.region_heads),
+        )
+        model = dataclasses.replace(model, region_guidance=guidance)
+        data = dataclasses.replace(
+            data,
+            base_config=dataclasses.replace(
+                data.base_config or _config.DataConfig(), region_annotations_dir=str(annotation_dir)
+            ),
+        )
+    elif getattr(args, "region_annotations_dir", None) is not None:
+        raise ValueError("--region-annotations-dir requires --region-guidance")
     updates = {
         "data": data,
+        "model": model,
         "weight_loader": weight_loader,
         "checkpoint_base_dir": args.checkpoint_base_dir,
         "checkpoint_dir_override": args.checkpoint_dir,
@@ -110,6 +136,24 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num-train-steps", type=int)
     parser.add_argument("--fsdp-devices", type=int)
     parser.add_argument("--wandb-enabled", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--region-guidance", action="store_true", help="Enable training-only annotation attention bias."
+    )
+    parser.add_argument(
+        "--region-annotations-dir", help="Defaults to <dataset-dir>/annotations when guidance is enabled."
+    )
+    parser.add_argument("--region-bias-strength", type=float, default=0.5)
+    parser.add_argument("--region-keep-probability", type=float, default=0.5)
+    parser.add_argument(
+        "--region-decay-start", type=float, default=0.3, help="Fraction of training before decay starts."
+    )
+    parser.add_argument("--region-decay-end", type=float, default=0.7, help="Fraction after which guidance is zero.")
+    parser.add_argument(
+        "--region-layers", type=int, nargs="+", help="Zero-based layers; defaults to two middle layers."
+    )
+    parser.add_argument(
+        "--region-heads", type=int, nargs="+", help="Zero-based query heads; defaults to the first quarter."
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--overwrite", action="store_true")
     mode.add_argument("--resume", action="store_true")
@@ -140,6 +184,8 @@ def main() -> None:
     logging.info("Checkpoint output: %s", config.checkpoint_dir)
     logging.info("Fine-tuning config: %s (batch size %d)", config.name, config.batch_size)
     logging.info("Image resolution: %s", config.model.image_resolution)
+    if config.model.region_guidance is not None:
+        logging.info("Training-only region guidance: %s", config.model.region_guidance)
     train.main(config)
 
 

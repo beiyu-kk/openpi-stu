@@ -190,14 +190,19 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
             )
         norm_stats = data_config.norm_stats
 
+    transforms = [
+        *data_config.repack_transforms.inputs,
+        *data_config.data_transforms.inputs,
+        _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+        *data_config.model_transforms.inputs,
+    ]
+    if data_config.region_annotations_dir is not None:
+        from openpi.training.region_annotations import RegionAnnotatedDataset
+
+        return RegionAnnotatedDataset(dataset, _transforms.compose(transforms), data_config.region_annotations_dir)
     return TransformedDataset(
         dataset,
-        [
-            *data_config.repack_transforms.inputs,
-            *data_config.data_transforms.inputs,
-            _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
-            *data_config.model_transforms.inputs,
-        ],
+        transforms,
     )
 
 
@@ -250,6 +255,14 @@ def create_data_loader(
         framework: The framework to use ("jax" or "pytorch").
     """
     data_config = config.data.create(config.assets_dirs, config.model)
+    region_guidance = getattr(config.model, "region_guidance", None)
+    if region_guidance is not None:
+        if framework != "jax" or not isinstance(config.data, _config.LeRobotPiperDataConfig):
+            raise ValueError("Region guidance currently supports only the JAX LeRobotPiperDataConfig pipeline")
+        if data_config.region_annotations_dir is None:
+            raise ValueError("Region guidance requires region_annotations_dir")
+    elif data_config.region_annotations_dir is not None:
+        raise ValueError("Region annotation loading requires model.region_guidance to be enabled")
     logging.info(f"data_config: {data_config}")
 
     if data_config.rlds_data_dir is not None:

@@ -106,6 +106,10 @@ class Observation(Generic[ArrayT]):
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
+    # Optional training sidecars. These never enter the policy's image/state inputs.
+    region_masks: dict[str, at.Float[ArrayT, "*b h w"]] | None = None
+    region_valid: dict[str, at.Bool[ArrayT, "*b"]] | None = None
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
@@ -126,6 +130,8 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            region_masks=data.get("region_masks"),
+            region_valid=data.get("region_valid"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -133,6 +139,9 @@ class Observation(Generic[ArrayT]):
         result = dataclasses.asdict(self)
         result["image"] = result.pop("images")
         result["image_mask"] = result.pop("image_masks")
+        for key in ("region_masks", "region_valid"):
+            if result[key] is None:
+                result.pop(key)
         return result
 
 
@@ -159,11 +168,18 @@ def preprocess_observation(
     batch_shape = observation.state.shape[:-1]
 
     out_images = {}
+    out_regions = {} if observation.region_masks is not None else None
     for key in image_keys:
         image = observation.images[key]
+        region = None if out_regions is None else observation.region_masks[key]
+        if region is not None and region.shape != image.shape[:-1]:
+            raise ValueError(f"Region mask for {key} must match its image before augmentation")
         if image.shape[1:3] != image_resolution:
             logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
             image = image_tools.resize_with_pad(image, *image_resolution)
+            if region is not None:
+                # The image helper pads float images with -1; masks require zero padding.
+                region = jnp.maximum(image_tools.resize_with_pad(region[..., None], *image_resolution)[..., 0], 0.0)
 
         if train:
             # Convert from [-1, 1] to [0, 1] for augmax.
@@ -181,12 +197,20 @@ def preprocess_observation(
                 augmax.ColorJitter(brightness=0.3, contrast=0.4, saturation=0.5),
             ]
             sub_rngs = jax.random.split(rng, image.shape[0])
-            image = jax.vmap(augmax.Chain(*transforms))(sub_rngs, image)
+            if region is None:
+                image = jax.vmap(augmax.Chain(*transforms))(sub_rngs, image)
+            else:
+                # DENSE shares image geometry and linear interpolation, but skips ColorJitter.
+                augment = augmax.Chain(*transforms, input_types=(augmax.InputType.IMAGE, augmax.InputType.DENSE))
+                image, region_channels = jax.vmap(augment)(sub_rngs, (image, region[..., None]))
+                region = jnp.clip(region_channels[..., 0], 0.0, 1.0)
 
             # Back to [-1, 1].
             image = image * 2.0 - 1.0
 
         out_images[key] = image
+        if out_regions is not None:
+            out_regions[key] = region
 
     # obtain mask
     out_masks = {}
@@ -205,6 +229,8 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        region_masks=out_regions,
+        region_valid=observation.region_valid,
     )
 
 

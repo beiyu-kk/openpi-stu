@@ -24,7 +24,7 @@ def test_resolve_base_params_path(tmp_path):
     ("config_name", "expected_size"),
     [
         ("pi05_piper_full_finetune", 224),
-        ("pi05_piper_lora_finetune", 224),
+        ("pi05_piper_lora_finetune", 448),
         ("pi05_piper_full_finetune_336", 336),
         ("pi05_piper_lora_finetune_336", 336),
         ("pi05_piper_full_finetune_448", 448),
@@ -61,7 +61,7 @@ def test_build_config_with_custom_paths(tmp_path, config_name, expected_size):
     config = train_piper._build_config(args)  # noqa: SLF001
     data_config = config.data.create_base_config(config.assets_dirs, config.model)
 
-    assert config.batch_size == 32
+    assert config.batch_size == (16 if "lora" in config_name else 32)
     assert config.model.image_resolution == (expected_size, expected_size)
     assert config.model is _config.get_config(config_name).model
     assert config.weight_loader.resize_siglip_posemb
@@ -137,3 +137,43 @@ def test_launcher_preserves_resolution_edited_in_train_config(tmp_path, monkeypa
     assert config.model is configured.model
     assert config.model.image_resolution == (size, size)
     assert config.weight_loader.resize_siglip_posemb == configured.weight_loader.resize_siglip_posemb
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_region_guidance_is_opt_in(tmp_path, monkeypatch, enabled):
+    dataset_dir = tmp_path / "dataset"
+    (dataset_dir / "meta").mkdir(parents=True)
+    (dataset_dir / "meta/info.json").write_text("{}")
+    (dataset_dir / "data").mkdir()
+    if enabled:
+        (dataset_dir / "annotations").mkdir()
+        (dataset_dir / "annotations/all_frames.parquet").touch()
+    argv = [
+        "train_piper.py",
+        "--config",
+        "pi05_piper_lora_finetune",
+        "--dataset-dir",
+        str(dataset_dir),
+        "--dataset-repo-id",
+        "local/book",
+        "--exp-name",
+        "test",
+        "--base-model-dir",
+        "gs://bucket/base",
+    ]
+    if enabled:
+        argv += ["--region-guidance"]
+    monkeypatch.setattr(sys, "argv", argv)
+    base = _config.get_config("pi05_piper_lora_finetune")
+    config = train_piper._build_config(train_piper._parse_args())  # noqa: SLF001
+    assert config.model.image_resolution == base.model.image_resolution
+    assert config.freeze_filter == base.freeze_filter
+    assert config.data.base_config.prompt_from_task
+    assert base.model.region_guidance is None
+    assert base.data.base_config.region_annotations_dir is None
+    if enabled:
+        assert config.model.region_guidance.strength == 0.5
+        assert config.data.base_config.region_annotations_dir == str(dataset_dir / "annotations")
+    else:
+        assert config.model is base.model
+        assert config.data.base_config.region_annotations_dir is None
