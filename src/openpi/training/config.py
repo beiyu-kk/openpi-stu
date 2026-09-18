@@ -322,7 +322,7 @@ class StuPiperDataConfig(DataConfigFactory):
             action_sequence_keys=("action",),
         )
 
-    
+
 @dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
@@ -428,10 +428,7 @@ _CONFIGS = [
     #
     TrainConfig(
         name="pi05_piper_full_finetune",
-        model=pi0_config.Pi0Config(
-            pi05=True, 
-            action_horizon=30, 
-            image_resolution=(224, 224)),
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30),
         data=LeRobotPiperDataConfig(
             base_config=DataConfig(prompt_from_task=True),
             use_delta_actions=True,
@@ -451,7 +448,6 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=30,
-            image_resolution=(448, 448),
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
         ),
@@ -510,17 +506,6 @@ _CONFIGS = [
         exp_name="debug_pi05",
         wandb_enabled=False,
     ),
-]
-
-_CONFIGS += [
-    dataclasses.replace(
-        config,
-        name=f"{config.name}_{image_size}",
-        model=dataclasses.replace(config.model, image_resolution=(image_size, image_size)),
-    )
-    for config in _CONFIGS
-    if config.name in {"pi05_piper_full_finetune", "pi05_piper_lora_finetune"}
-    for image_size in (336, 448)
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):

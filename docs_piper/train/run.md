@@ -37,11 +37,14 @@ print(maybe_download("gs://openpi-assets/checkpoints/pi05_base"))
 
 全量微调和 LoRA 微调的动作块长度统一为 30 帧；当前数据集为 30 FPS，因此每个动作块覆盖约 1 秒。
 
+`--config` 直接选择 TrainConfig，`--image-size` 独立指定图像边长（14 的正整数倍，例如 224、336、448）。两个 Piper 配置默认均为 224；恢复训练和部署时需保持与训练一致的尺寸。
+
 全量微调：
 
 ```bash
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train_piper.py \
     --config pi05_piper_full_finetune \
+    --image-size 224 \
     --dataset-dir /media/ubun/16T/Dataset/piper_data/recognize_book_label_color_lerobot_v2.1 \
     --dataset-repo-id recognize_book_label_color \
     --base-model-dir /media/ubun/16T/checkpoints/openpi/openpi-assets/checkpoints/pi05_base/params \
@@ -51,7 +54,7 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train_piper.py \
     --overwrite
 ```
 
-`dataset-dir` 和 `base-model-dir` 是必须传递的参数
+`dataset-dir` 和 `dataset-repo-id` 是必须传递的参数；不传 `base-model-dir` 时使用所选 TrainConfig 的基础权重路径。
 
 
 LoRA 微调：
@@ -59,6 +62,7 @@ LoRA 微调：
 ```bash
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train_piper.py \
     --config pi05_piper_lora_finetune \
+    --image-size 448 \
     --dataset-dir /media/ubun/16T/Dataset/piper_data/recognize_book_label_color_lerobot_v2.1 \
     --dataset-repo-id recognize_book_label_color \
     --base-model-dir /media/ubun/16T/checkpoints/openpi/openpi-assets/checkpoints/pi05_base/params \

@@ -85,7 +85,7 @@ m_j=\frac{1}{14\times14}
 
 不过，**整个当前模型仍要求输入为正方形，边长为 14 的正整数倍，而且一次训练使用固定的配置分辨率。** 所以准确说法是“区域引导随模型支持的分辨率适配”，不能理解成任意尺寸、任意长宽比都能直接送入模型。
 
-目前仓库中普通 `pi05_piper_lora_finetune` 配置是 **448×448**，`pi05_piper_full_finetune` 是 **224×224**；region-guidance 开关本身不改变它们。
+`--config` 选择 `pi05_piper_lora_finetune` 或 `pi05_piper_full_finetune` 等训练策略，两个 Piper 配置的默认分辨率均为 **224×224**。通过独立参数 `--image-size 224/336/448` 选择尺寸；region-guidance 开关本身不改变分辨率。恢复训练时使用相同的 `--image-size`，部署时使用对应的 `--policy.image-size`。
 
 **注意力修改发生在模型内部，具体位置是 softmax 之前的分数。**
 

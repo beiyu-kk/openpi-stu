@@ -36,6 +36,9 @@ def test_resume_preserves_guidance_schedule_and_method(tmp_path):
     train._record_region_guidance(config, resuming=True)  # noqa: SLF001
     with pytest.raises(ValueError, match="resume settings differ"):
         train._record_region_guidance(dataclasses.replace(config, num_train_steps=20000), resuming=True)  # noqa: SLF001
+    resized = dataclasses.replace(config, model=dataclasses.replace(config.model, image_resolution=(448, 448)))
+    with pytest.raises(ValueError, match="resume settings differ"):
+        train._record_region_guidance(resized, resuming=True)  # noqa: SLF001
     with pytest.raises(ValueError, match="same guidance options"):
         train._record_region_guidance(dataclasses.replace(config, model=base.model), resuming=True)  # noqa: SLF001
 

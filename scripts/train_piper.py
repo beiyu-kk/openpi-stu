@@ -5,6 +5,7 @@ import dataclasses
 import logging
 import pathlib
 
+from openpi.models import pi0_config
 from openpi.models.region_guidance import RegionGuidanceConfig
 from openpi.training import config as _config
 from openpi.training import weight_loaders
@@ -17,15 +18,11 @@ else:
     import train
 
 
-CONFIGS = (
-    "pi05_piper_full_finetune",
-    "pi05_piper_lora_finetune",
-    "pi05_piper_full_finetune_336",
-    "pi05_piper_lora_finetune_336",
-    "pi05_piper_full_finetune_448",
-    "pi05_piper_lora_finetune_448",
-)
-DEFAULT_BASE_MODEL = "gs://openpi-assets/checkpoints/pi05_base"
+def _parse_image_size(value: str) -> int:
+    size = int(value)
+    if size <= 0 or size % 14 != 0:
+        raise argparse.ArgumentTypeError("Image size must be a positive multiple of 14 (e.g. 224, 336, 448).")
+    return size
 
 
 def _resolve_base_params_path(value: str) -> str:
@@ -55,10 +52,9 @@ def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
     base_config = _config.get_config(args.config)
     if not isinstance(base_config.weight_loader, weight_loaders.CheckpointWeightLoader):
         raise TypeError("Piper fine-tuning requires a CheckpointWeightLoader")
-    weight_loader = dataclasses.replace(
-        base_config.weight_loader,
-        params_path=_resolve_base_params_path(args.base_model_dir),
-    )
+    weight_loader = base_config.weight_loader
+    if args.base_model_dir is not None:
+        weight_loader = dataclasses.replace(weight_loader, params_path=_resolve_base_params_path(args.base_model_dir))
     repo_id = args.dataset_repo_id
 
     data = dataclasses.replace(
@@ -66,9 +62,13 @@ def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
         repo_id=repo_id,
         dataset_root=str(dataset_dir),
         norm_stats_dir=str(norm_stats_dir),
-        assets=_config.AssetsConfig(asset_id=repo_id),
+        assets=dataclasses.replace(base_config.data.assets, asset_id=repo_id),
     )
     model = base_config.model
+    if args.image_size is not None:
+        if not isinstance(model, pi0_config.Pi0Config):
+            raise ValueError("--image-size requires a Pi0Config model")
+        model = dataclasses.replace(model, image_resolution=(args.image_size, args.image_size))
     if getattr(args, "region_guidance", False):
         if not isinstance(data, _config.LeRobotPiperDataConfig):
             raise ValueError("Region guidance requires the standard Piper data transforms")
@@ -96,13 +96,13 @@ def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
         "data": data,
         "model": model,
         "weight_loader": weight_loader,
-        "checkpoint_base_dir": args.checkpoint_base_dir,
-        "checkpoint_dir_override": args.checkpoint_dir,
         "exp_name": args.exp_name,
         "overwrite": args.overwrite,
         "resume": args.resume,
     }
-    for arg_name in ("batch_size", "num_workers", "num_train_steps", "fsdp_devices"):
+    if args.checkpoint_dir is not None:
+        updates["checkpoint_dir_override"] = args.checkpoint_dir
+    for arg_name in ("checkpoint_base_dir", "batch_size", "num_workers", "num_train_steps", "fsdp_devices"):
         if (value := getattr(args, arg_name)) is not None:
             updates[arg_name] = value
     if args.wandb_enabled is not None:
@@ -112,15 +112,23 @@ def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", choices=CONFIGS, default=CONFIGS[0])
+    parser.add_argument(
+        "--config",
+        default="pi05_piper_full_finetune",
+        help="TrainConfig name registered in src/openpi/training/config.py.",
+    )
+    parser.add_argument(
+        "--image-size",
+        type=_parse_image_size,
+        help="Square image size for preprocessing and the model; defaults to the selected config (Piper: 224).",
+    )
     parser.add_argument("--dataset-dir", required=True, help="Root directory of the local LeRobot dataset.")
     parser.add_argument("--dataset-repo-id", required=True, help="Logical ID used for dataset assets in checkpoints.")
     parser.add_argument(
         "--base-model-dir",
-        default=DEFAULT_BASE_MODEL,
-        help="pi0.5 checkpoint root or its params directory; local paths and gs:// URLs are supported.",
+        help="Checkpoint root or params directory; defaults to the selected config's weight loader.",
     )
-    parser.add_argument("--checkpoint-base-dir", default="./checkpoints")
+    parser.add_argument("--checkpoint-base-dir", help="Defaults to the selected config's checkpoint base directory.")
     parser.add_argument("--checkpoint-dir", help="Exact checkpoint output directory; overrides --checkpoint-base-dir.")
     parser.add_argument("--norm-stats-dir", help="Directory containing norm_stats.json; defaults to --dataset-dir.")
     parser.add_argument(
@@ -131,7 +139,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-norm-frames", type=int)
     parser.add_argument("--exp-name", required=True)
-    parser.add_argument("--batch-size", type=int, default=None, help="Defaults to 32 from the Piper configs.")
+    parser.add_argument("--batch-size", type=int, default=None, help="Defaults to the selected TrainConfig.")
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--num-train-steps", type=int)
     parser.add_argument("--fsdp-devices", type=int)

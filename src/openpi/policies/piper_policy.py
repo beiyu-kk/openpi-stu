@@ -74,7 +74,14 @@ class PiperInputs(transforms.DataTransformFn):
     model_type: _model.ModelType
 
     def __call__(self, data: dict) -> dict:
-        base_image = _parse_image(data["observation/top_image"])
+        # The external Piper RTC client names the head camera observation/image.
+        if "observation/top_image" in data:
+            base_image = data["observation/top_image"]
+        elif "observation/image" in data:
+            base_image = data["observation/image"]
+        else:
+            raise KeyError("Missing Piper head camera: expected 'observation/top_image' or 'observation/image'.")
+        base_image = _parse_image(base_image)
         right_wrist_image = _parse_image(data["observation/right_wrist_image"])
 
         inputs = {

@@ -16,6 +16,7 @@ def test_piper_finetune_configs():
     assert isinstance(full.model, pi0_config.Pi0Config)
     assert full.model.pi05
     assert full.model.action_horizon == 30
+    assert full.model.image_resolution == (224, 224)
     assert full.batch_size == 32
     assert isinstance(full.data, _config.LeRobotPiperDataConfig)
     assert full.data.use_delta_actions
@@ -27,6 +28,7 @@ def test_piper_finetune_configs():
     assert isinstance(lora.model, pi0_config.Pi0Config)
     assert lora.model.pi05
     assert lora.model.action_horizon == 30
+    assert lora.model.image_resolution == (224, 224)
     assert "lora" in lora.model.paligemma_variant
     assert "lora" in lora.model.action_expert_variant
     assert lora.batch_size == 16
@@ -41,20 +43,6 @@ def test_checkpoint_dir_override(tmp_path):
     config = _config.get_config("pi05_piper_full_finetune")
     config = dataclasses.replace(config, exp_name="test", checkpoint_dir_override=str(tmp_path))
     assert config.checkpoint_dir == tmp_path
-
-
-@pytest.mark.parametrize("name", ["pi05_piper_full_finetune", "pi05_piper_lora_finetune"])
-@pytest.mark.parametrize("size", [224, 336, 448])
-def test_piper_resolution_configs(name, size):
-    base = _config.get_config(name)
-    configured = _config.get_config(name if size == 224 else f"{name}_{size}")
-    base_size = 448 if "lora" in name else 224
-    assert base.model.image_resolution == (base_size, base_size)
-    expected_size = base_size if size == 224 else size
-    assert configured.model.image_resolution == (expected_size, expected_size)
-    assert configured.weight_loader.resize_siglip_posemb
-    assert configured.model.paligemma_variant == base.model.paligemma_variant
-    assert configured.freeze_filter == base.freeze_filter
 
 
 @pytest.mark.parametrize("pi05", [False, True])

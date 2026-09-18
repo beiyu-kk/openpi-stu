@@ -6,6 +6,7 @@ import socket
 
 import tyro
 
+from openpi.models import pi0_config
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
 from openpi.serving import websocket_policy_server
@@ -32,6 +33,8 @@ class Checkpoint:
     dir: str
     # Normalization asset id. If omitted, it is inferred when the checkpoint contains exactly one set of stats.
     asset_id: str | None = None
+    # Square image size used for training; defaults to the selected config's model resolution.
+    image_size: int | None = None
 
 
 @dataclasses.dataclass
@@ -99,6 +102,15 @@ def _configured_asset_id(train_config: _config.TrainConfig) -> str | None:
 
 def _prepare_checkpoint(checkpoint: Checkpoint) -> tuple[_config.TrainConfig, pathlib.Path]:
     train_config = _config.get_config(checkpoint.config)
+    if checkpoint.image_size is not None:
+        if not isinstance(train_config.model, pi0_config.Pi0Config):
+            raise ValueError("--policy.image-size requires a Pi0Config model")
+        train_config = dataclasses.replace(
+            train_config,
+            model=dataclasses.replace(
+                train_config.model, image_resolution=(checkpoint.image_size, checkpoint.image_size)
+            ),
+        )
     checkpoint_dir = _download.maybe_download(checkpoint.dir)
     asset_id = checkpoint.asset_id or _configured_asset_id(train_config)
 
