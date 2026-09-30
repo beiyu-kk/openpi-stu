@@ -91,12 +91,24 @@ def create_rlds_dataloader(
 def get_norm_stats_dir(config: _config.TrainConfig, data_config: _config.DataConfig) -> pathlib.Path:
     if config.data.norm_stats_dir is not None:
         return pathlib.Path(config.data.norm_stats_dir).expanduser().resolve()
+    if config.training_rtc is not None and config.data.dataset_root is not None:
+        from openpi.training.rtc_data import default_norm_stats_dir
+
+        return default_norm_stats_dir(config)
     if data_config.repo_id is None:
         raise ValueError("Data config must have a repo_id")
     return config.assets_dirs / data_config.repo_id
 
 
 def compute(config: _config.TrainConfig, max_frames: int | None = None) -> pathlib.Path:
+    config = _config.resolve_training_config(config)
+    if config.training_rtc is not None:
+        from openpi.training import rtc_norm_stats
+
+        if max_frames is not None:
+            raise ValueError("RTC production statistics require the full training split; omit --max-norm-frames")
+        rtc_norm_stats.compute(config)
+        return get_norm_stats_dir(config, config.data.create(config.assets_dirs, config.model))
     if max_frames is not None and max_frames < config.batch_size:
         raise ValueError(f"max_frames ({max_frames}) must be at least the batch size ({config.batch_size})")
     data_config = config.data.create(config.assets_dirs, config.model)

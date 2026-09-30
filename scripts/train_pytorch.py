@@ -307,6 +307,8 @@ def log_memory_usage(device, step, phase="unknown"):
 
 
 def train_loop(config: _config.TrainConfig):
+    if config.training_rtc is not None:
+        raise ValueError("Training RTC supports JAX only; use scripts/train_piper.py")
     use_ddp, local_rank, device = setup_ddp()
     is_main = (not use_ddp) or (dist.get_rank() == 0)
     set_seed(config.seed, local_rank)

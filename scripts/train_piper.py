@@ -48,7 +48,6 @@ def _validate_dataset_dir(value: str) -> pathlib.Path:
 
 def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
     dataset_dir = _validate_dataset_dir(args.dataset_dir)
-    norm_stats_dir = pathlib.Path(args.norm_stats_dir).expanduser().resolve() if args.norm_stats_dir else dataset_dir
     base_config = _config.get_config(args.config)
     if not isinstance(base_config.weight_loader, weight_loaders.CheckpointWeightLoader):
         raise TypeError("Piper fine-tuning requires a CheckpointWeightLoader")
@@ -56,12 +55,15 @@ def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
     if args.base_model_dir is not None:
         weight_loader = dataclasses.replace(weight_loader, params_path=_resolve_base_params_path(args.base_model_dir))
     repo_id = args.dataset_repo_id
+    norm_stats_dir = pathlib.Path(args.norm_stats_dir).expanduser().resolve() if args.norm_stats_dir else None
+    if norm_stats_dir is None and base_config.training_rtc is None:
+        norm_stats_dir = dataset_dir
 
     data = dataclasses.replace(
         base_config.data,
         repo_id=repo_id,
         dataset_root=str(dataset_dir),
-        norm_stats_dir=str(norm_stats_dir),
+        norm_stats_dir=str(norm_stats_dir) if norm_stats_dir is not None else None,
         assets=dataclasses.replace(base_config.data.assets, asset_id=repo_id),
     )
     model = base_config.model
@@ -107,7 +109,14 @@ def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
             updates[arg_name] = value
     if args.wandb_enabled is not None:
         updates["wandb_enabled"] = args.wandb_enabled
-    return dataclasses.replace(base_config, **updates)
+    config = _config.resolve_training_config(dataclasses.replace(base_config, **updates))
+    if config.training_rtc is not None and config.data.norm_stats_dir is None:
+        from openpi.training.rtc_data import default_norm_stats_dir
+
+        config = dataclasses.replace(
+            config, data=dataclasses.replace(config.data, norm_stats_dir=str(default_norm_stats_dir(config)))
+        )
+    return config
 
 
 def _parse_args() -> argparse.Namespace:
@@ -130,12 +139,15 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint-base-dir", help="Defaults to the selected config's checkpoint base directory.")
     parser.add_argument("--checkpoint-dir", help="Exact checkpoint output directory; overrides --checkpoint-base-dir.")
-    parser.add_argument("--norm-stats-dir", help="Directory containing norm_stats.json; defaults to --dataset-dir.")
+    parser.add_argument(
+        "--norm-stats-dir",
+        help="Directory containing norm_stats.json; RTC defaults to a separate directory for its training split.",
+    )
     parser.add_argument(
         "--compute-norm-stats",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Compute missing stats, or reuse them when norm_stats.json already exists.",
+        help="Compute missing stats; RTC also rebuilds statistics that do not match its training split.",
     )
     parser.add_argument("--max-norm-frames", type=int)
     parser.add_argument("--exp-name", required=True)
@@ -176,7 +188,18 @@ def main() -> None:
     norm_stats_dir = compute_norm_stats.get_norm_stats_dir(config, data_config)
     norm_stats_path = norm_stats_dir / "norm_stats.json"
 
-    if norm_stats_path.exists():
+    needs_stats = not norm_stats_path.exists()
+    if not needs_stats and config.training_rtc is not None:
+        from openpi.training.rtc_manifest import validate_norm_stats
+
+        try:
+            validate_norm_stats(config, data_config)
+        except ValueError:
+            if not args.compute_norm_stats or config.training_rtc.norm_source != "train_split":
+                raise
+            logging.info("Recomputing RTC statistics for the current training split: %s", norm_stats_path)
+            needs_stats = True
+    if not needs_stats:
         logging.info("Reusing normalization stats: %s", norm_stats_path)
     elif args.compute_norm_stats:
         logging.info("Normalization stats not found; computing: %s", norm_stats_path)
@@ -192,6 +215,8 @@ def main() -> None:
     logging.info("Checkpoint output: %s", config.checkpoint_dir)
     logging.info("Fine-tuning config: %s (batch size %d)", config.name, config.batch_size)
     logging.info("Image resolution: %s", config.model.image_resolution)
+    if config.training_rtc is not None:
+        logging.info("Training RTC: %s", config.training_rtc)
     if config.model.region_guidance is not None:
         logging.info("Training-only region guidance: %s", config.model.region_guidance)
     train.main(config)

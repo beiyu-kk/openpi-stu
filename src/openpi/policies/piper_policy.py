@@ -5,8 +5,8 @@ import numpy as np
 
 from openpi import transforms
 from openpi.models import model as _model
-
 from openpi.models.stl_gate import detector
+
 
 def _parse_image(image) -> np.ndarray:
     image = np.asarray(image)
@@ -100,6 +100,8 @@ class PiperInputs(transforms.DataTransformFn):
 
         if "actions" in data:
             inputs["actions"] = np.asarray(data["actions"])
+        if "action_is_pad" in data:
+            inputs["action_is_pad"] = np.asarray(data["action_is_pad"], dtype=bool)
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
         return inputs

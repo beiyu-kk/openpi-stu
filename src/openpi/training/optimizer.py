@@ -107,3 +107,34 @@ def create_optimizer(
 ) -> optax.GradientTransformation:
     lr = lr_schedule.create()
     return optimizer.create(lr, weight_decay_mask=weight_decay_mask)
+
+
+@dataclasses.dataclass(frozen=True)
+class RTCAdamW(AdamW):
+    """Actual two-rate optimizer: inherited parameters use a smaller LR than LoRA."""
+
+    inherited_lr_scale: float = 0.2
+
+    def create(self, lr, weight_decay_mask=None):
+        import jax
+
+        if not 0 < self.inherited_lr_scale <= 1:
+            raise ValueError("inherited_lr_scale must be in (0,1]")
+        if weight_decay_mask is not None:
+            raise ValueError("RTCAdamW does not accept an external decay mask")
+
+        def labels(params):
+            return jax.tree_util.tree_map_with_path(
+                lambda path, _: "lora" if "lora" in jax.tree_util.keystr(path) else "inherited", params
+            )
+
+        def adam(rate):
+            return optax.adamw(rate, b1=self.b1, b2=self.b2, eps=self.eps, weight_decay=self.weight_decay)
+
+        inherited_lr = (
+            (lambda step: lr(step) * self.inherited_lr_scale) if callable(lr) else lr * self.inherited_lr_scale
+        )
+        return optax.chain(
+            optax.clip_by_global_norm(self.clip_gradient_norm),
+            optax.multi_transform({"lora": adam(lr), "inherited": adam(inherited_lr)}, labels),
+        )

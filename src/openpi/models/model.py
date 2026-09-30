@@ -106,6 +106,9 @@ class Observation(Generic[ArrayT]):
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
+    # Episode padding for action windows; only used by training RTC.
+    action_is_pad: at.Bool[ArrayT, "*b ah"] | None = None
+
     # Optional training sidecars. These never enter the policy's image/state inputs.
     region_masks: dict[str, at.Float[ArrayT, "*b h w"]] | None = None
     region_valid: dict[str, at.Bool[ArrayT, "*b"]] | None = None
@@ -130,6 +133,7 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            action_is_pad=data.get("action_is_pad"),
             region_masks=data.get("region_masks"),
             region_valid=data.get("region_valid"),
         )
@@ -139,7 +143,7 @@ class Observation(Generic[ArrayT]):
         result = dataclasses.asdict(self)
         result["image"] = result.pop("images")
         result["image_mask"] = result.pop("image_masks")
-        for key in ("region_masks", "region_valid"):
+        for key in ("region_masks", "region_valid", "action_is_pad"):
             if result[key] is None:
                 result.pop(key)
         return result
@@ -229,6 +233,7 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        action_is_pad=observation.action_is_pad,
         region_masks=out_regions,
         region_valid=observation.region_valid,
     )

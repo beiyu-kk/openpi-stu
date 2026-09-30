@@ -1,5 +1,6 @@
 import dataclasses
-from typing import TYPE_CHECKING
+import math
+from typing import TYPE_CHECKING, Literal
 
 import flax.nnx as nnx
 import jax
@@ -37,9 +38,38 @@ class Pi0Config(_model.BaseModelConfig):
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
+    # Runtime settings derived exclusively from TrainConfig.training_rtc.
+    simulated_delay: int | None = None
+    simulated_delay_weights: tuple[float, ...] | None = None
+    rtc_loss_reduction: Literal["official", "per_element"] = "official"
+    rtc_time_distribution: Literal["beta", "uniform"] = "beta"
+    rtc_finetune_mode: Literal["lora", "full"] = "lora"
+
     pytorch_compile_mode: str | None = "max-autotune"
 
     def __post_init__(self):
+        if self.simulated_delay is not None:
+            if not self.pi05:
+                raise ValueError("Training RTC supports JAX pi0.5 only")
+            if not 1 <= self.simulated_delay <= self.action_horizon:
+                raise ValueError("simulated_delay must be in [1, action_horizon]")
+            if self.simulated_delay_weights is not None:
+                w = self.simulated_delay_weights
+                if len(w) != self.simulated_delay or any(not math.isfinite(v) or v < 0 for v in w) or sum(w) <= 0:
+                    raise ValueError("RTC weights must be finite, nonnegative, have length S and positive sum")
+        elif self.simulated_delay_weights is not None:
+            raise ValueError("RTC weights require simulated_delay")
+        if self.rtc_loss_reduction not in ("official", "per_element"):
+            raise ValueError("Unknown RTC loss reduction")
+        if self.rtc_time_distribution not in ("beta", "uniform"):
+            raise ValueError("Unknown RTC time distribution")
+        if self.rtc_finetune_mode not in ("lora", "full"):
+            raise ValueError("Unknown RTC finetune mode")
+        if self.rtc_finetune_mode == "full":
+            if not self.pi05 or self.simulated_delay is None:
+                raise ValueError("Full RTC fine-tuning requires a pi05 RTC model")
+            if "lora" in self.paligemma_variant or "lora" in self.action_expert_variant:
+                raise ValueError("Full RTC fine-tuning uses base Transformer variants without LoRA adapters")
         if (
             len(self.image_resolution) != 2
             or any(type(size) is not int or size <= 0 or size % 14 != 0 for size in self.image_resolution)
@@ -130,3 +160,19 @@ class Pi0Config(_model.BaseModelConfig):
         if not filters:
             return nnx.Nothing
         return nnx.All(*filters)
+
+    def get_rtc_freeze_filter(self) -> nnx.filterlib.Filter:
+        """Resolve the explicitly selected full or action-side LoRA RTC training mode."""
+        if self.rtc_finetune_mode == "full":
+            return nnx.Nothing
+        if not self.pi05 or "lora" not in self.action_expert_variant:
+            raise ValueError("RTC adaptation requires pi05 and an action expert LoRA variant")
+        # _1 identifies the action expert in the two-expert Gemma module.
+        trainable = nnx.Any(
+            nnx_utils.PathRegex(r"PaliGemma/llm/.*_1/.*lora.*"),
+            nnx_utils.PathRegex(
+                r"PaliGemma/llm/(layers/(pre_attention_norm_1|pre_ffw_norm_1)|final_norm_1)/Dense_0/(kernel|bias)"
+            ),
+            nnx_utils.PathRegex(r"(time_mlp_in|time_mlp_out|action_in_proj|action_out_proj)/(kernel|bias)"),
+        )
+        return nnx.All(nnx.Param, nnx.Not(trainable))

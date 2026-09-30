@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+import dataclasses
 import logging
 import multiprocessing
 import os
@@ -135,6 +136,32 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+class RTCLeRobotDataset(lerobot_dataset.LeRobotDataset):
+    """Pinned LeRobot v2.1 indexes compact episode bounds by original episode ID.
+
+    A split such as [2, 5] has only two rows of episode bounds; remap ONLY the
+    query-bound lookup. Keep original IDs for task metadata and video paths.
+    """
+
+    def _get_query_indices(self, idx, ep_idx):
+        if self.episodes is not None:
+            ep_idx = self.episodes.index(ep_idx)
+        return super()._get_query_indices(idx, ep_idx)
+
+
+def resolve_rtc_episodes(data_config):
+    if data_config.training_rtc is None or data_config.repo_id == "fake":
+        return data_config
+    from openpi.training.rtc_config import episode_split
+
+    metadata = lerobot_dataset.LeRobotDatasetMetadata(data_config.repo_id, root=data_config.dataset_root)
+    train, validation = episode_split(metadata.total_episodes, data_config.training_rtc)
+    episodes = train if data_config.rtc_split == "train" else validation
+    if data_config.episodes is not None and tuple(data_config.episodes) != episodes:
+        raise ValueError("RTC episode list differs from the configured split")
+    return dataclasses.replace(data_config, episodes=episodes)
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -146,10 +173,13 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     _ensure_hf_list_feature_compatibility()
+    data_config = resolve_rtc_episodes(data_config)
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.dataset_root)
-    dataset = lerobot_dataset.LeRobotDataset(
+    dataset_cls = RTCLeRobotDataset if data_config.training_rtc is not None else lerobot_dataset.LeRobotDataset
+    dataset = dataset_cls(
         data_config.repo_id,
         root=data_config.dataset_root,
+        **({"episodes": list(data_config.episodes)} if data_config.episodes is not None else {}),
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
@@ -254,7 +284,10 @@ def create_data_loader(
         skip_norm_stats: Whether to skip data normalization.
         framework: The framework to use ("jax" or "pytorch").
     """
-    data_config = config.data.create(config.assets_dirs, config.model)
+    config = _config.resolve_training_config(config)
+    if config.training_rtc is not None and framework != "jax":
+        raise ValueError("Training RTC supports JAX only")
+    data_config = resolve_rtc_episodes(config.data.create(config.assets_dirs, config.model))
     region_guidance = getattr(config.model, "region_guidance", None)
     if region_guidance is not None:
         if framework != "jax" or not isinstance(config.data, _config.LeRobotPiperDataConfig):
@@ -344,6 +377,21 @@ def create_torch_data_loader(
     else:
         local_batch_size = batch_size // jax.process_count()
 
+    if data_config.training_rtc is not None and data_config.rtc_split == "validation" and data_config.repo_id != "fake":
+        from openpi.training.rtc_data import validation_indices
+
+        metadata = lerobot_dataset.LeRobotDatasetMetadata(data_config.repo_id, root=data_config.dataset_root)
+        lengths = [metadata.episodes[i]["length"] for i in data_config.episodes]
+        # Avoid repeating validation frames when the held-out set is smaller than the budget.
+        devices = jax.device_count()
+        local_batch_size = min(local_batch_size, len(dataset) // devices * devices)
+        if local_batch_size < 1:
+            raise ValueError("RTC validation set is smaller than the device count")
+        count = min(len(dataset), local_batch_size * data_config.training_rtc.validation_batches)
+        count = count // local_batch_size * local_batch_size
+        sampler = validation_indices(lengths, count)
+        num_batches = count // local_batch_size
+        shuffle = False
     logging.info(f"local_batch_size: {local_batch_size}")
     data_loader = TorchDataLoader(
         dataset,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures as futures
 import dataclasses
+import json
 import logging
 from typing import Protocol
 
@@ -55,7 +56,7 @@ def initialize_checkpoint_dir(
     # Special case: the checkpoint directory exists and the user requests to resume training, but the training run did
     # not get to the first checkpoint saved. In this case, we don't actually want the train script to try and restore a
     # checkpoint, since it will fail.
-    if resuming and tuple(mngr.all_steps()) in [(), (0,)]:
+    if resuming and not mngr.all_steps():
         logging.info("Checkpoint directory exists, but does not contain any checkpoints. Aborting resume.")
         resuming = False
 
@@ -67,8 +68,12 @@ def save_state(
     state: training_utils.TrainState,
     data_loader: _data_loader.DataLoader,
     step: int,
+    *,
+    rtc_manifest: dict | None = None,
 ):
     def save_assets(directory: epath.Path):
+        if rtc_manifest is not None:
+            (directory / "rtc_manifest.json").write_text(json.dumps(rtc_manifest, indent=2) + "\n")
         # Save the normalization stats.
         data_config = data_loader.data_config()
         norm_stats = data_config.norm_stats

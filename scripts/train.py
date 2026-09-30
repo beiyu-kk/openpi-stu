@@ -153,6 +153,15 @@ def train_step(
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
+        if config.training_rtc is not None:
+            from openpi.models.training_rtc import loss_grid
+
+            errors, active = model.flow_errors(rng, observation, actions, train=True, **region_kwargs)
+            count = jnp.sum(active)
+            loss = jnp.mean(loss_grid(errors, active, config.training_rtc.loss_reduction))
+            raw_dim = min(7, errors.shape[-1])
+            raw_error = jnp.sum(jnp.where(active[..., None], errors[..., :raw_dim], 0.0))
+            return loss, {"rtc/active_tokens": count, "rtc/raw_mse": raw_error / jnp.maximum(count * raw_dim, 1)}
         chunked_loss = model.compute_loss(rng, observation, actions, train=True, **region_kwargs)
         return jnp.mean(chunked_loss)
 
@@ -161,10 +170,24 @@ def train_step(
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    rtc_info = {}
+    if config.training_rtc is not None:
+        (loss, rtc_info), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
+            model, train_rng, observation, actions
+        )
+    else:
+        loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
 
     params = state.params.filter(config.trainable_filter)
-    updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
+    if config.training_rtc is not None:
+        # No target tokens means no Adam momentum/weight-decay update either.
+        updates, new_opt_state = jax.lax.cond(
+            rtc_info["rtc/active_tokens"] > 0,
+            lambda: state.tx.update(grads, state.opt_state, params),
+            lambda: (jax.tree.map(jnp.zeros_like, params), state.opt_state),
+        )
+    else:
+        updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
     new_params = optax.apply_updates(params, updates)
 
     # Update the model in place and return the new full state.
@@ -193,6 +216,7 @@ def train_step(
         "loss": loss,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
+        **rtc_info,
     }
     if guidance is not None:
         info["region/strength"] = strength
@@ -228,6 +252,10 @@ def _record_region_guidance(config: _config.TrainConfig, *, resuming: bool):
 
 def main(config: _config.TrainConfig):
     init_logging()
+    config = _config.resolve_training_config(config)
+    from openpi.training import rtc_manifest
+
+    config = rtc_manifest.prepare_resume(config)
     logging.info(f"Running on: {platform.node()}")
     guidance = getattr(config.model, "region_guidance", None)
     if guidance is not None:
@@ -259,6 +287,8 @@ def main(config: _config.TrainConfig):
         overwrite=config.overwrite,
         resume=config.resume,
     )
+    if config.training_rtc is not None and not resuming:
+        config = _config.prepare_rtc_base(config)
     _record_region_guidance(config, resuming=resuming)
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
@@ -267,6 +297,21 @@ def main(config: _config.TrainConfig):
         sharding=data_sharding,
         shuffle=True,
     )
+    rtc_record = None
+    validation_loader = None
+    if config.training_rtc is not None:
+        from openpi.training import rtc_data
+        from openpi.training import rtc_validation
+
+        rtc_record = rtc_manifest.build(config, data_loader.data_config())
+        rtc_manifest.record(config, rtc_record, resuming=resuming)
+        if config.training_rtc.validation_interval:
+            validation_loader = _data_loader.create_data_loader(
+                rtc_data.validation_config(config),
+                sharding=data_sharding,
+                shuffle=False,
+            )
+        logging.info("Training RTC: %s", config.training_rtc)
     data_iter = iter(data_loader)
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
@@ -292,6 +337,18 @@ def main(config: _config.TrainConfig):
         donate_argnums=(1,),
     )
 
+    if config.training_rtc is not None:
+        trainable = train_state.params.filter(config.trainable_filter)
+        logging.info(
+            "RTC trainable parameters: %d / %d; optimizer: %s",
+            sum(x.size for x in jax.tree.leaves(trainable)),
+            sum(x.size for x in jax.tree.leaves(train_state.params)),
+            type(config.optimizer).__name__,
+        )
+    if validation_loader is not None:
+        evaluate_rtc = jax.jit(
+            functools.partial(rtc_validation.state_batch_sums, train_state.model_def, raw_action_dim=7)
+        )
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
         range(start_step, config.num_train_steps),
@@ -314,8 +371,26 @@ def main(config: _config.TrainConfig):
             infos = []
         batch = next(data_iter)
 
+        if validation_loader is not None and (
+            (step + 1) % config.training_rtc.validation_interval == 0 or step == config.num_train_steps - 1
+        ):
+            metrics = rtc_validation.evaluate_batches(
+                functools.partial(evaluate_rtc, train_state.params),
+                validation_loader,
+                seed=config.seed,
+                num_batches=config.training_rtc.validation_batches,
+                raw_action_dim=7,
+                model_action_dim=config.model.action_dim,
+                reduction=config.training_rtc.loss_reduction,
+            )
+            logging.info("RTC validation at update %d: %s", step + 1, metrics)
+            wandb.log(metrics, step=step)
+            if jax.process_index() == 0:
+                with (config.checkpoint_dir / "rtc_validation.jsonl").open("a") as stream:
+                    stream.write(json.dumps({"step": step + 1, **metrics}) + "\n")
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
-            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            checkpoint_kwargs = {"rtc_manifest": rtc_record} if rtc_record is not None else {}
+            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step, **checkpoint_kwargs)
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()

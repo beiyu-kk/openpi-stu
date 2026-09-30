@@ -21,6 +21,7 @@ import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.optimizer as _optimizer
+from openpi.training.rtc_config import TrainingRTCConfig
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
 
@@ -68,6 +69,10 @@ class DataConfig:
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
     norm_stats: dict[str, _transforms.NormStats] | None = None
+    # Derived from TrainConfig; users configure RTC only on TrainConfig.training_rtc.
+    training_rtc: TrainingRTCConfig | None = None
+    rtc_split: Literal["train", "validation"] = "train"
+    episodes: tuple[int, ...] | None = None
 
     # Used to adopt the inputs from a dataset specific format to a common format
     # which is expected by the data transforms.
@@ -211,7 +216,7 @@ class FakeDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        return DataConfig(repo_id=self.repo_id)
+        return dataclasses.replace(self.base_config or DataConfig(), repo_id=self.repo_id)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -247,17 +252,18 @@ class LeRobotPiperDataConfig(DataConfigFactory):
                         "observation/state": "observation.state",
                         "actions": "action",
                         "prompt": "prompt",
+                        **(
+                            {"action_is_pad": "action_is_pad"}
+                            if getattr(model_config, "simulated_delay", None) is not None
+                            else {}
+                        ),
                     }
                 )
             ]
         )
         data_transforms = _transforms.Group(
-            inputs=[
-                piper_policy.PiperInputs(model_type=model_config.model_type)
-            ],
-            outputs=[
-                piper_policy.PiperOutputs()
-            ],
+            inputs=[piper_policy.PiperInputs(model_type=model_config.model_type)],
+            outputs=[piper_policy.PiperOutputs()],
         )
         if self.use_delta_actions:
             # All seven Piper dimensions are relative, including the continuous gripper dimension.
@@ -302,9 +308,7 @@ class StuPiperDataConfig(DataConfigFactory):
                 piper_policy.PiperInputs(model_type=model_config.model_type),
                 piper_policy.StuImagePreprocess(),
             ],
-            outputs=[
-                piper_policy.PiperOutputs()
-            ],
+            outputs=[piper_policy.PiperOutputs()],
         )
         if self.use_delta_actions:
             # All seven Piper dimensions are relative, including the continuous gripper dimension.
@@ -336,6 +340,8 @@ class TrainConfig:
     # -- see BaseModelConfig. Specific model implementations (e.g., Pi0Config) inherit from BaseModelConfig and may
     # define additional attributes.
     model: _model.BaseModelConfig = dataclasses.field(default_factory=pi0_config.Pi0Config)
+    # Single source of truth. None keeps the original training behavior.
+    training_rtc: TrainingRTCConfig | None = None
 
     # A weight loader can optionally load (possibly partial) weights from disk after the model is initialized.
     weight_loader: weight_loaders.WeightLoader = dataclasses.field(default_factory=weight_loaders.NoOpWeightLoader)
@@ -421,6 +427,91 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
+def resolve_training_config(config: TrainConfig) -> TrainConfig:
+    """Derive RTC runtime settings after overrides, without doing I/O or mutating presets."""
+    rtc = config.training_rtc
+    if rtc is None:
+        if getattr(config.model, "simulated_delay", None) is not None:
+            raise ValueError("Configure RTC through TrainConfig.training_rtc, not model.simulated_delay")
+        return config
+    if not isinstance(config.model, pi0_config.Pi0Config) or not config.model.pi05:
+        raise ValueError("Training RTC supports JAX pi0.5 only")
+    if config.pytorch_weight_path is not None:
+        raise ValueError("Training RTC supports JAX checkpoints only")
+    if rtc.max_delay >= config.model.action_horizon:
+        raise ValueError("RTC max_delay must be smaller than action_horizon")
+    if not isinstance(config.data, LeRobotPiperDataConfig | FakeDataConfig):
+        raise ValueError("RTC requires the standard Piper data transforms")
+    if isinstance(config.data, LeRobotPiperDataConfig) and not config.data.use_delta_actions:
+        raise ValueError("Piper RTC requires all seven delta action dimensions")
+    if isinstance(config.data, LeRobotPiperDataConfig) and config.model.action_dim < 7:
+        raise ValueError("Piper RTC model action_dim must be at least 7")
+    model = dataclasses.replace(
+        config.model,
+        simulated_delay=rtc.max_delay + 1,
+        simulated_delay_weights=rtc.delay_weights,
+        rtc_loss_reduction=rtc.loss_reduction,
+        rtc_time_distribution=rtc.time_distribution,
+        rtc_finetune_mode=rtc.finetune_mode,
+        paligemma_variant=(
+            config.model.paligemma_variant.removesuffix("_lora")
+            if rtc.finetune_mode == "full"
+            else config.model.paligemma_variant
+        ),
+        action_expert_variant=(
+            config.model.action_expert_variant.removesuffix("_lora")
+            if rtc.finetune_mode == "full"
+            else "gemma_300m_lora"
+        ),
+    )
+    if not isinstance(config.optimizer, _optimizer.AdamW):
+        raise ValueError("RTC requires AdamW")
+    adam_settings = {f.name: getattr(config.optimizer, f.name) for f in dataclasses.fields(_optimizer.AdamW)}
+    optimizer = (
+        _optimizer.AdamW(**adam_settings)
+        if rtc.finetune_mode == "full"
+        else _optimizer.RTCAdamW(**adam_settings, inherited_lr_scale=rtc.inherited_lr_scale)
+    )
+    loader = config.weight_loader
+    if isinstance(loader, weight_loaders.CheckpointWeightLoader):
+        loader = weight_loaders.RTCCheckpointWeightLoader(**dataclasses.asdict(loader))
+    data = dataclasses.replace(
+        config.data,
+        base_config=dataclasses.replace(config.data.base_config or DataConfig(), training_rtc=rtc),
+    )
+    config = dataclasses.replace(
+        config,
+        model=model,
+        data=data,
+        optimizer=optimizer,
+        weight_loader=loader,
+        freeze_filter=model.get_rtc_freeze_filter(),
+        ema_decay=None,
+    )
+    if data.dataset_root is not None and data.norm_stats_dir is None and rtc.norm_source == "train_split":
+        from openpi.training.rtc_data import default_norm_stats_dir
+
+        config = dataclasses.replace(
+            config, data=dataclasses.replace(data, norm_stats_dir=str(default_norm_stats_dir(config)))
+        )
+    return config
+
+
+def prepare_rtc_base(config: TrainConfig) -> TrainConfig:
+    """Inspect only checkpoint metadata before initializing a new RTC model."""
+    if config.training_rtc is None or not isinstance(config.weight_loader, weight_loaders.RTCCheckpointWeightLoader):
+        return config
+    keys = config.weight_loader.parameter_keys()
+    adapters = [k for k in keys if "lora" in k]
+    if config.training_rtc.finetune_mode == "full" and adapters:
+        raise ValueError("Full RTC cannot discard LoRA adapters; merge them into base weights before loading")
+    if config.training_rtc.finetune_mode == "lora":
+        vlm_lora = any(k.startswith("PaliGemma/llm/") and "_1/" not in k for k in adapters)
+        model = dataclasses.replace(config.model, paligemma_variant="gemma_2b_lora" if vlm_lora else "gemma_2b")
+        config = dataclasses.replace(config, model=model)
+    return resolve_training_config(config)
+
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
@@ -471,6 +562,39 @@ _CONFIGS = [
         save_interval=1000,
         keep_period=1_000,
     ),
+    # RTC is enabled only by training_rtc; the launcher needs no separate RTC flag.
+    TrainConfig(
+        name="pi05_piper_full_finetune_rtc",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30),
+        training_rtc=TrainingRTCConfig(finetune_mode="full"),
+        data=LeRobotPiperDataConfig(base_config=DataConfig(prompt_from_task=True)),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=500, peak_lr=1e-5, decay_steps=10000, decay_lr=1e-6),
+        batch_size=32,
+        num_train_steps=10000,
+        save_interval=1000,
+        keep_period=5000,
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_piper_lora_finetune_rtc",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, action_expert_variant="gemma_300m_lora"),
+        training_rtc=TrainingRTCConfig(finetune_mode="lora"),
+        data=LeRobotPiperDataConfig(base_config=DataConfig(prompt_from_task=True)),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500, peak_lr=2.5e-5, decay_steps=10000, decay_lr=2.5e-6
+        ),
+        batch_size=16,
+        num_train_steps=10000,
+        save_interval=1000,
+        keep_period=5000,
+        ema_decay=None,
+    ),
     #
     # Debugging configs.
     #
@@ -514,7 +638,7 @@ _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
 
 
 def cli() -> TrainConfig:
-    return tyro.extras.overridable_config_cli({k: (k, v) for k, v in _CONFIGS_DICT.items()})
+    return resolve_training_config(tyro.extras.overridable_config_cli({k: (k, v) for k, v in _CONFIGS_DICT.items()}))
 
 
 def get_config(config_name: str) -> TrainConfig:
@@ -524,4 +648,4 @@ def get_config(config_name: str) -> TrainConfig:
         closest_str = f" Did you mean '{closest[0]}'? " if closest else ""
         raise ValueError(f"Config '{config_name}' not found.{closest_str}")
 
-    return _CONFIGS_DICT[config_name]
+    return resolve_training_config(_CONFIGS_DICT[config_name])

@@ -7,6 +7,7 @@ from typing import Protocol, runtime_checkable
 import flax.traverse_util
 import jax
 import numpy as np
+import orbax.checkpoint as ocp
 
 import openpi.models.model as _model
 import openpi.shared.array_typing as at
@@ -58,6 +59,26 @@ class CheckpointWeightLoader(WeightLoader):
         return _merge_params(
             loaded_params, params, missing_regex=".*lora.*", resize_siglip_posemb=self.resize_siglip_posemb
         )
+
+
+@dataclasses.dataclass(frozen=True)
+class RTCCheckpointWeightLoader(CheckpointWeightLoader):
+    """Preserve existing adapters and fail if the target would silently discard them."""
+
+    def parameter_keys(self) -> set[str]:
+        path = download.maybe_download(self.params_path)
+        with ocp.PyTreeCheckpointer() as checkpointer:
+            metadata = checkpointer.metadata(path)
+        tree = metadata.tree if hasattr(metadata, "tree") else metadata
+        return set(flax.traverse_util.flatten_dict(tree["params"], sep="/"))
+
+    def load(self, params: at.Params) -> at.Params:
+        loaded = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        reference = set(flax.traverse_util.flatten_dict(params, sep="/"))
+        extra = [k for k in flax.traverse_util.flatten_dict(loaded, sep="/") if "lora" in k and k not in reference]
+        if extra:
+            raise ValueError(f"RTC model would discard checkpoint adapters; preserve or merge them first: {extra[:3]}")
+        return _merge_params(loaded, params, missing_regex=".*lora.*", resize_siglip_posemb=self.resize_siglip_posemb)
 
 
 @dataclasses.dataclass(frozen=True)
