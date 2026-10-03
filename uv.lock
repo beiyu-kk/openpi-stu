@@ -3373,8 +3373,10 @@ dependencies = [
     { name = "openpi-client" },
     { name = "orbax-checkpoint" },
     { name = "pillow" },
+    { name = "piper-sdk" },
     { name = "polars" },
     { name = "pyclipper" },
+    { name = "pyrealsense2" },
     { name = "rich" },
     { name = "sentencepiece" },
     { name = "torch" },
@@ -3427,8 +3429,10 @@ requires-dist = [
     { name = "openpi-client", editable = "packages/openpi-client" },
     { name = "orbax-checkpoint", specifier = "==0.11.13" },
     { name = "pillow", specifier = ">=11.0.0" },
+    { name = "piper-sdk", specifier = ">=0.6.2" },
     { name = "polars", specifier = ">=1.30.0" },
     { name = "pyclipper", specifier = "==1.3.0.post6" },
+    { name = "pyrealsense2", specifier = ">=2.58.4" },
     { name = "rich", specifier = ">=14.0.0" },
     { name = "sentencepiece", specifier = ">=0.2.0" },
     { name = "torch", specifier = "==2.7.1" },
@@ -3681,6 +3685,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f6/20/5c0a0aa83b213b7a07ec01e71a3d6ea2cf4ad1d2c686cc0168173b6089e7/pillow-11.2.1-pp311-pypy311_pp73-manylinux_2_28_aarch64.whl", hash = "sha256:036e53f4170e270ddb8797d4c590e6dd14d28e15c7da375c18978045f7e6c37b", size = 3527165, upload-time = "2025-04-12T17:49:55.164Z" },
     { url = "https://files.pythonhosted.org/packages/58/0e/2abab98a72202d91146abc839e10c14f7cf36166f12838ea0c4db3ca6ecb/pillow-11.2.1-pp311-pypy311_pp73-manylinux_2_28_x86_64.whl", hash = "sha256:14f73f7c291279bd65fda51ee87affd7c1e097709f7fdd0188957a16c264601f", size = 3571586, upload-time = "2025-04-12T17:49:57.171Z" },
     { url = "https://files.pythonhosted.org/packages/21/2c/5e05f58658cf49b6667762cca03d6e7d85cededde2caf2ab37b81f80e574/pillow-11.2.1-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:208653868d5c9ecc2b327f9b9ef34e0e42a4cdd172c2988fd81d62d2bc9bc044", size = 2674751, upload-time = "2025-04-12T17:49:59.628Z" },
+]
+
+[[package]]
+name = "piper-sdk"
+version = "0.6.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-can" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/de/47/d35bcfd06ef2f81c25d9c3e7e2a4853637c998c3e1bea4addd6de5718e56/piper_sdk-0.6.2.tar.gz", hash = "sha256:d9e0684c52230b078110e04f3bfefdc4b918422537878b60bbee10420b159c9d", size = 162173, upload-time = "2026-07-31T09:27:37.116Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/10/2f/5c96034de9816d7da431b4c007efff2c8d4afd3182d4541ac3c64493080c/piper_sdk-0.6.2-py3-none-any.whl", hash = "sha256:d4aa1088fd6716f2f8c81a269dc5fb88b4c875a859e1c06e95bf2e9e8a6493c6", size = 194143, upload-time = "2026-07-31T09:27:35.482Z" },
 ]
 
 [[package]]
@@ -4245,6 +4261,22 @@ wheels = [
 ]
 
 [[package]]
+name = "pyrealsense2"
+version = "2.58.4.10922"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/00/2c4800f6a0aa8a6fbb73d0d007d89461591c048178802f57d8cb93aeac0c/pyrealsense2-2.58.4.10922-cp311-cp311-manylinux1_x86_64.whl", hash = "sha256:fd82fc3a794c8dfaf93c2b6d2ffcadbb64b61e9dcfb07069dc10a5d8dcc41c43", size = 13098724, upload-time = "2026-08-30T08:34:21.168Z" },
+    { url = "https://files.pythonhosted.org/packages/83/22/21f11c5f610a69c3485725a130895afa39969792f106710c3473510ae466/pyrealsense2-2.58.4.10922-cp311-cp311-win_amd64.whl", hash = "sha256:ef29d24212368e557c0d633d6145424220adf27d1a677b8184a886ce83cc2da0", size = 9174097, upload-time = "2026-08-30T08:34:29.096Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/26/b477bca457fd20f221f1e408b196d6c16ff33aacbf73f8e325b6370b4ddb/pyrealsense2-2.58.4.10922-cp312-cp312-manylinux1_x86_64.whl", hash = "sha256:1e83454cbaf9de50962d78ce3addb0b6a6d8d02259c1f0c64d4a0d527a02bf73", size = 13094959, upload-time = "2026-08-30T08:34:38.859Z" },
+    { url = "https://files.pythonhosted.org/packages/85/e6/8b1d98e717834351131dbdb479d6a169d3a81e04f6165d599509293d818c/pyrealsense2-2.58.4.10922-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:04a61fad8d4c69bcd6acb3ddcee65630e6ce31f94f5bd309a72c5831b9fa83cd", size = 6742674, upload-time = "2026-08-30T08:34:44.333Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/db/d49df902b3b9c8dde7bd2005b9008777e8a714b1a2aab118357ac7225329/pyrealsense2-2.58.4.10922-cp312-cp312-win_amd64.whl", hash = "sha256:23765d29c225a419e2b40a098d1b1f1bcdd81241eae0f5be0d93fe984ddefbe4", size = 9175868, upload-time = "2026-08-30T08:34:49.418Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/96/2c4328d919bc2662c7a35549eee3095edff4d9ac0ed556d6b03bfaadb28c/pyrealsense2-2.58.4.10922-cp313-cp313-manylinux1_x86_64.whl", hash = "sha256:fe9304ef7d50223909c78a6b82fc5d53d60448e409e9f754ed89390d7791e4d2", size = 13095069, upload-time = "2026-08-30T08:35:02.04Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/e3/d6eb60c27f2ec0bb00a7d823ff44450f3dc4b9da42bcfe0872e43635942e/pyrealsense2-2.58.4.10922-cp313-cp313-win_amd64.whl", hash = "sha256:073b8b3da97380137d119ec410678664e48a726905b030ac366ce78d233d32d2", size = 9175678, upload-time = "2026-08-30T08:35:10.079Z" },
+    { url = "https://files.pythonhosted.org/packages/04/5a/49b7dc84e4fb8fe1ac3708ccf41d34e3ac21e22482068ba4608181c3607f/pyrealsense2-2.58.4.10922-cp314-cp314-manylinux1_x86_64.whl", hash = "sha256:4e3b9dd95980ba20cddde4729c434bec0393ecd0a075fab0f7c37440178f8f2b", size = 13563480, upload-time = "2026-08-30T08:35:22.384Z" },
+    { url = "https://files.pythonhosted.org/packages/96/62/701eed065528a6356f5542830172154a84a482a16863c06968df552d9821/pyrealsense2-2.58.4.10922-cp314-cp314-win_amd64.whl", hash = "sha256:aae3644b08476e0ef123c13e31f5ee83f7abbef1716804a568b44d0c6d5d8592", size = 9449229, upload-time = "2026-08-30T08:35:29.62Z" },
+]
+
+[[package]]
 name = "pysocks"
 version = "1.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -4266,6 +4298,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ae/3c/c9d525a414d506893f0cd8a8d0de7706446213181570cdbd766691164e40/pytest-8.3.5.tar.gz", hash = "sha256:f4efe70cc14e511565ac476b57c279e12a855b11f48f212af1080ef2263d3845", size = 1450891, upload-time = "2025-03-02T12:54:54.503Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/30/3d/64ad57c803f1fa1e963a7946b6e0fea4a70df53c1a7fed304586539c2bac/pytest-8.3.5-py3-none-any.whl", hash = "sha256:c69214aa47deac29fad6c2a4f590b9c4a9fdb16a403176fe154b79c0b4d4d820", size = 343634, upload-time = "2025-03-02T12:54:52.069Z" },
+]
+
+[[package]]
+name = "python-can"
+version = "4.6.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "typing-extensions" },
+    { name = "wrapt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/74/f9/a9d99d36dd33be5badb747801c9255c3c526171a5542092eaacc73350fb8/python_can-4.6.1.tar.gz", hash = "sha256:290fea135d04b8504ebff33889cc6d301e2181a54099116609f940825ffe5005", size = 1206049, upload-time = "2025-08-12T07:44:58.314Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/34/e4ac153acdbcfba7f48bc73d6586a74c91cc919fcc2e29acbf81be329d1f/python_can-4.6.1-py3-none-any.whl", hash = "sha256:17f95255868a95108dcfcb90565a684dad32d5a3ebb35afd14f739e18c84ff6c", size = 276996, upload-time = "2025-08-12T07:44:56.55Z" },
 ]
 
 [[package]]

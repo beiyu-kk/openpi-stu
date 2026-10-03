@@ -56,3 +56,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
     @override
     def reset(self) -> None:
         pass
+
+    def close(self) -> None:
+        """Close the underlying websocket and unblock any waiting receive."""
+        self._ws.close()

@@ -271,7 +271,13 @@ class RealSenseCamera:
         timeout_ms: int,
         warmup_frames: int,
     ) -> None:
-        import pyrealsense2 as rs
+        try:
+            import pyrealsense2 as rs
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "Piper camera support requires pyrealsense2. Install it with "
+                "`uv pip install --python .venv/bin/python pyrealsense2`."
+            ) from exc
 
         self._rs = rs
         self._name = name
@@ -365,7 +371,13 @@ class PiperArm:
         gripper_effort: int,
         binarize_gripper: bool,
     ) -> None:
-        from piper_sdk import C_PiperInterface_V2
+        try:
+            from piper_sdk import C_PiperInterface_V2
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "Piper arm support requires piper_sdk. Install the local SDK with "
+                "`uv pip install --python .venv/bin/python -e /path/to/piper_sdk`."
+            ) from exc
 
         self._move_speed_percent = move_speed_percent
         self._gripper_open_mm = gripper_open_mm

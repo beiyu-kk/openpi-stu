@@ -180,9 +180,40 @@ obs = {
 将绝对前缀转换到训练的 delta／归一化坐标。每次去噪迭代均固定前缀，反归一化后还原原始
 前缀命令，避免已承诺动作因数值误差改变。不提供 RTC 字段时按 delay 0 运行。
 
-本次提供训练、模型采样及服务端策略接口。现有 Piper 客户端不会因此自动改为异步执行，
-动作队列、控制 tick 对齐和端到端延迟测量需要在客户端另行接入。
+异步 Piper 客户端为 `examples/piper/rtc_main.py`，同步基线仍使用 `examples/piper/main.py`：
+
+```bash
+uv run --no-sync examples/piper/rtc_main.py \
+    --host=127.0.0.1 --port=8000 --rtc-delay=4 --control-hz=30 \
+    --prompt='Pick up the red soldier and place it off the board.'
+```
+
+先确认相机序列号、CAN 和任务提示。客户端启动会使能机械臂，先做一次冷启动和
+`--warmup-requests=3` 次预热推理，再发送动作。不指定 `--rtc-delay` 时，以预热往返耗时
+最大值加一 tick 估计 delay；首次 JAX 编译耗时不计入估计。`--inference-timeout-s=30`
+限制等待推理的时间；冷启动较慢时可调大。`max_delay=4` 在 30 Hz 下只覆盖约 133 ms。
+
+前缀包含关节限位、SDK 量化及夹爪保持／二值化后的命令。提前返回仍执行完已承诺的
+原队列；响应必须回显请求字段并保持前缀不变，随后才接续后缀。超出承诺时间时保持
+上一目标，丢弃迟到的续写，用新的观测和保持命令重试；连续
+`--max-consecutive-misses=3` 次失败后退出。此策略不会保证持续高延迟时仍有动作进展。
+
+当前控制线程仍同步读取两路相机，预览也占用控制时间，因此 `--control-hz` 是目标上限，
+不是实时频率保证。机械臂 SDK 断开不等同于急停。降低控制频率会改变训练动作的播放
+速度，实测时还应记录控制间隔、相机等待时间、预热后端到端延迟及任务成功率。
 离线 flow loss 也不等价于实机动作平滑度或任务成功率。
+
+Piper 真机依赖不属于 OpenPI 的基础依赖，需要安装到运行 `rtc_main.py` 的同一个 Python
+环境：
+
+```bash
+uv pip install --python .venv/bin/python pyrealsense2
+uv pip install --python .venv/bin/python \
+  -e /home/ubun/project/piper/data_collection/piper_data_collection/thirdparty/piper_sdk
+```
+
+如果出现 `ModuleNotFoundError: pyrealsense2` 或 `piper_sdk`，说明包安装到了另一个
+conda/venv 环境；`uv run` 不需要执行 `deactivate`，直接用上面两条命令安装即可。
 
 ## 验证
 
@@ -194,6 +225,12 @@ JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=2 \
 测试覆盖真实小模型的前向／反向／JIT、full 与 LoRA 冻结范围、region guidance、padding、
 固定前缀、参数分组、统计量、checkpoint 保存／续训及策略加载。
 双虚拟 CPU 设备测试用于检查分片与恢复，不代表完整 π0.5 的 GPU 显存或吞吐测试。
+
+客户端无硬件回归（包括本地 websocket 关闭测试）：
+
+```bash
+.venv/bin/python -m pytest tests/test_piper_rtc_client.py -q
+```
 
 算法移植参考本机 `openpi-training-rtc/src/openpi` 实现，保留当前仓库的分辨率、区域偏置、
 本地 dataset_root 和 Piper 输入格式；配置统一管理及回归测试在本仓库实现。
