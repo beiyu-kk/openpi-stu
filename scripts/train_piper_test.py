@@ -1,5 +1,6 @@
 import argparse
 import dataclasses
+import json
 import sys
 
 import numpy as np
@@ -198,11 +199,15 @@ def test_launcher_preserves_resolution_edited_in_train_config(tmp_path, monkeypa
 def test_region_guidance_is_opt_in(tmp_path, monkeypatch, enabled, image_size):
     dataset_dir = tmp_path / "dataset"
     (dataset_dir / "meta").mkdir(parents=True)
-    (dataset_dir / "meta/info.json").write_text("{}")
     (dataset_dir / "data").mkdir()
+    info = {}
     if enabled:
-        (dataset_dir / "annotations").mkdir()
-        (dataset_dir / "annotations/all_frames.parquet").touch()
+        feature = {"dtype": "float32", "shape": [4], "names": ["x1", "y1", "x2", "y2"]}
+        info["features"] = {
+            "observation.region.hand_right.book_bbox_xyxy": feature,
+            "observation.region.hand_right.title_bbox_xyxy": feature,
+        }
+    (dataset_dir / "meta/info.json").write_text(json.dumps(info))
     argv = [
         "train_piper.py",
         "--config",
@@ -228,10 +233,48 @@ def test_region_guidance_is_opt_in(tmp_path, monkeypatch, enabled, image_size):
     assert config.freeze_filter == base.freeze_filter
     assert config.data.base_config.prompt_from_task
     assert base.model.region_guidance is None
-    assert base.data.base_config.region_annotations_dir is None
+    assert not base.data.base_config.region_annotations_embedded
     if enabled:
         assert config.model.region_guidance.strength == 0.5
-        assert config.data.base_config.region_annotations_dir == str(dataset_dir / "annotations")
+        assert config.data.base_config.region_annotations_embedded
     else:
         assert config.model.region_guidance is None
-        assert config.data.base_config.region_annotations_dir is None
+        assert not config.data.base_config.region_annotations_embedded
+
+
+def test_region_guidance_prefers_embedded_annotations(tmp_path, monkeypatch):
+    dataset_dir = tmp_path / "dataset"
+    (dataset_dir / "meta").mkdir(parents=True)
+    (dataset_dir / "data").mkdir()
+    feature = {"dtype": "float32", "shape": [4], "names": ["x1", "y1", "x2", "y2"]}
+    (dataset_dir / "meta/info.json").write_text(
+        json.dumps(
+            {
+                "features": {
+                    "observation.region.hand_right.book_bbox_xyxy": feature,
+                    "observation.region.hand_right.title_bbox_xyxy": feature,
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_piper.py",
+            "--config",
+            "pi05_piper_lora_finetune",
+            "--dataset-dir",
+            str(dataset_dir),
+            "--dataset-repo-id",
+            "local/book",
+            "--exp-name",
+            "test",
+            "--base-model-dir",
+            "gs://bucket/base",
+            "--region-guidance",
+        ],
+    )
+
+    config = train_piper._build_config(train_piper._parse_args())  # noqa: SLF001
+    assert config.data.base_config.region_annotations_embedded

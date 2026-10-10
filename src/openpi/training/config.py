@@ -63,8 +63,11 @@ class DataConfig:
     repo_id: str | None = None
     # Optional root of a local LeRobot dataset. If unset, LeRobot resolves repo_id from its cache or the Hub.
     dataset_root: str | None = None
-    # Opt-in training sidecars; the standard data flow never reads this directory.
-    region_annotations_dir: str | None = None
+    # Read region boxes embedded directly in the LeRobot episode parquet files during guided training.
+    region_annotations_embedded: bool = False
+    # Which bbox family the training-only region guidance should use.
+    # ``book`` and ``title`` keep the experiments separate; ``both`` unions them.
+    region_annotation_mode: Literal["none", "book", "title", "both"] = "book"
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -568,6 +571,30 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(pi05=True, action_horizon=30),
         training_rtc=TrainingRTCConfig(finetune_mode="full"),
         data=LeRobotPiperDataConfig(base_config=DataConfig(prompt_from_task=True)),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=500, peak_lr=1e-5, decay_steps=10000, decay_lr=1e-6),
+        batch_size=32,
+        num_train_steps=10000,
+        save_interval=1000,
+        keep_period=5000,
+        ema_decay=None,
+    ),
+    # Full Pi0.5 RTC fine-tuning with training-only bbox attention bias.
+    # The launcher reads embedded annotations at runtime; ordinary Piper configs
+    # remain free of annotation processing and attention modifications.
+    TrainConfig(
+        name="pi05_piper_full_finetune_rtc_attention_bias",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            region_guidance=pi0_config.RegionGuidanceConfig(),
+        ),
+        training_rtc=TrainingRTCConfig(finetune_mode="full"),
+        data=LeRobotPiperDataConfig(
+            base_config=DataConfig(prompt_from_task=True, region_annotation_mode="book"),
+        ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
         ),

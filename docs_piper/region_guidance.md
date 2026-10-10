@@ -2,19 +2,27 @@
 
 This option uses the existing black-label annotations to bias action-to-image
 attention during training. It adds no auxiliary loss, model parameters, image
-views, detector, or inference inputs. The existing Piper commands and configs
-keep their original behavior unless `--region-guidance` is specified.
+views, detector, or inference inputs. Ordinary Piper configs keep their original
+behavior unless `--region-guidance` is specified. The dedicated
+`pi05_piper_full_finetune_rtc_attention_bias` config enables guidance directly.
 
 ## Launch
 
-Run from the repository root. The dataset below is the annotated independent
-copy; neither training mode needs to modify the original dataset.
+Run from the repository root. The dataset already contains the two bbox fields
+in its episode parquet files.
+
+For the current `recognize_book_name` RTC run, use the dedicated config and
+`--dataset-dir .../success/origin`; see
+[`rtc_attention_bias_training.md`](rtc_attention_bias_training.md) for the exact
+command. That config does not require an additional `--region-guidance` flag.
+The command below demonstrates enabling the same mechanism explicitly on an
+ordinary LoRA config.
 
 ```bash
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run --no-sync scripts/train_piper.py \
   --config pi05_piper_lora_finetune \
   --image-size 448 \
-  --dataset-dir /media/ubun/16T/Dataset/piper_data/recognition_book/recognize_book_label_color_1_lerobot_1_v2.1_spine_annotated \
+  --dataset-dir /media/ubun/16T/Dataset/piper_eva_data/recognition/recognize_book_name/success/origin \
   --dataset-repo-id recognize_book_label_color_1_region_bias \
   --base-model-dir /media/ubun/16T/checkpoints/openpi/openpi-assets/checkpoints/pi05_base/params \
   --checkpoint-dir /media/ubun/16T/checkpoints/openpi/recognize_book_label_color_1_region_bias \
@@ -36,17 +44,17 @@ sets the square input resolution independently. Both Piper configs default to
 224. Replace former `_336`/`_448` config names with the base name and
 `--image-size 336`/`--image-size 448`.
 
-`--region-annotations-dir` can point to a separate `annotations/` directory;
-it defaults to `<dataset-dir>/annotations`. Startup verifies the source manifest
-against the selected dataset, including every source file's SHA256. A mismatch
-aborts the run rather than using another dataset's boxes.
+There is no sidecar or separate annotation path. Startup validates the embedded
+feature declarations, parquet column types, episode count, and total frame
+count. Field locations, conversion, and inspection commands are documented in
+[`annotation_adapter.md`](annotation_adapter.md).
 
 ## Defaults
 
 | Setting | Value |
 | --- | --- |
-| Region source | Visible black-label polygon, `label_polygon_xy` |
-| Eligibility | `use_for_region_loss=true`; used as a validity flag, not a new loss |
+| Region source | Embedded book/title xyxy bbox from the right-wrist image |
+| Eligibility | A valid positive-area bbox; `[-1, -1, -1, -1]` means unavailable |
 | Initial bias | 0.5 |
 | Initial keep probability | 0.5 per example and camera |
 | Constant phase | First 30% of optimizer steps |
@@ -75,13 +83,12 @@ The defaults are experimental starting points, not proven optimal values.
 
 ## Data and Attention
 
-The original transforms run first. A read-only dataset wrapper attaches two
-optional fields, `region_masks` and `region_valid`, afterward. Invalid regions
-and the missing left camera receive zero masks. No action samples are dropped.
-Episode, frame, global index, timestamp and original image dimensions are checked.
+The dataset wrapper reads the bbox from the same LeRobot sample, then attaches
+`region_masks` and `region_valid`. Invalid regions and the missing left camera
+receive zero masks. No action samples are dropped.
 
-Verified polygons reconstruct the label masks without decompressing a whole
-video's NPZ for every shuffled sample. Masks use the same resize/padding geometry
+Boxes are rasterized into masks in the original right-wrist image coordinates.
+Masks use the same resize/padding geometry
 as the original images. The existing augmentation chain jointly transforms
 images and masks: masks share cropping/rotation but skip color jitter. Fractional
 coverage is averaged over each 14-by-14 image patch. At 448 pixels, each camera

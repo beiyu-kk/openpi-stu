@@ -2,6 +2,7 @@
 
 import argparse
 import dataclasses
+import json
 import logging
 import pathlib
 
@@ -46,6 +47,13 @@ def _validate_dataset_dir(value: str) -> pathlib.Path:
     return dataset_dir
 
 
+def _has_embedded_annotations(dataset_dir: pathlib.Path) -> bool:
+    from openpi.training.region_annotations import EMBEDDED_KEYS
+
+    info = json.loads((dataset_dir / "meta" / "info.json").read_text())
+    return all(key in info.get("features", {}) for key in EMBEDDED_KEYS)
+
+
 def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
     dataset_dir = _validate_dataset_dir(args.dataset_dir)
     base_config = _config.get_config(args.config)
@@ -66,34 +74,47 @@ def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
         norm_stats_dir=str(norm_stats_dir) if norm_stats_dir is not None else None,
         assets=dataclasses.replace(base_config.data.assets, asset_id=repo_id),
     )
+    if getattr(args, "region_annotation_mode", None) is not None:
+        data = dataclasses.replace(
+            data,
+            base_config=dataclasses.replace(
+                data.base_config or _config.DataConfig(),
+                region_annotation_mode=args.region_annotation_mode,
+            ),
+        )
     model = base_config.model
     if args.image_size is not None:
         if not isinstance(model, pi0_config.Pi0Config):
             raise ValueError("--image-size requires a Pi0Config model")
         model = dataclasses.replace(model, image_resolution=(args.image_size, args.image_size))
-    if getattr(args, "region_guidance", False):
+    # The named attention-bias config enables guidance itself. The flag also
+    # turns it on for the ordinary baseline configs, preserving their defaults.
+    guidance_enabled = getattr(model, "region_guidance", None) is not None or getattr(args, "region_guidance", False)
+    if guidance_enabled:
         if not isinstance(data, _config.LeRobotPiperDataConfig):
             raise ValueError("Region guidance requires the standard Piper data transforms")
-        annotation_dir = pathlib.Path(args.region_annotations_dir or dataset_dir / "annotations").expanduser().resolve()
-        if not (annotation_dir / "all_frames.parquet").is_file():
-            raise FileNotFoundError(f"Region annotation table not found in {annotation_dir}")
-        guidance = RegionGuidanceConfig(
-            strength=args.region_bias_strength,
-            keep_probability=args.region_keep_probability,
-            decay_start=args.region_decay_start,
-            decay_end=args.region_decay_end,
-            layers=None if args.region_layers is None else tuple(args.region_layers),
-            heads=None if args.region_heads is None else tuple(args.region_heads),
-        )
+        if not _has_embedded_annotations(dataset_dir):
+            raise FileNotFoundError("Region guidance requires bbox fields embedded in --dataset-dir")
+        guidance = getattr(model, "region_guidance", None) or RegionGuidanceConfig()
+        # CLI values are overrides only when the opt-in flag is explicit. The
+        # named config otherwise retains its registered guidance settings.
+        if getattr(args, "region_guidance", False):
+            guidance = RegionGuidanceConfig(
+                strength=args.region_bias_strength,
+                keep_probability=args.region_keep_probability,
+                decay_start=args.region_decay_start,
+                decay_end=args.region_decay_end,
+                layers=None if args.region_layers is None else tuple(args.region_layers),
+                heads=None if args.region_heads is None else tuple(args.region_heads),
+            )
         model = dataclasses.replace(model, region_guidance=guidance)
         data = dataclasses.replace(
             data,
             base_config=dataclasses.replace(
-                data.base_config or _config.DataConfig(), region_annotations_dir=str(annotation_dir)
+                data.base_config or _config.DataConfig(),
+                region_annotations_embedded=True,
             ),
         )
-    elif getattr(args, "region_annotations_dir", None) is not None:
-        raise ValueError("--region-annotations-dir requires --region-guidance")
     updates = {
         "data": data,
         "model": model,
@@ -160,7 +181,10 @@ def _parse_args() -> argparse.Namespace:
         "--region-guidance", action="store_true", help="Enable training-only annotation attention bias."
     )
     parser.add_argument(
-        "--region-annotations-dir", help="Defaults to <dataset-dir>/annotations when guidance is enabled."
+        "--region-annotation-mode",
+        choices=("book", "title", "both", "none"),
+        default=None,
+        help="Select book boxes, title boxes, their union, or no region for guidance.",
     )
     parser.add_argument("--region-bias-strength", type=float, default=0.5)
     parser.add_argument("--region-keep-probability", type=float, default=0.5)

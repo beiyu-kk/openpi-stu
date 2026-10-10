@@ -226,10 +226,14 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
         _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
         *data_config.model_transforms.inputs,
     ]
-    if data_config.region_annotations_dir is not None:
+    if data_config.region_annotations_embedded:
         from openpi.training.region_annotations import RegionAnnotatedDataset
 
-        return RegionAnnotatedDataset(dataset, _transforms.compose(transforms), data_config.region_annotations_dir)
+        return RegionAnnotatedDataset(
+            dataset,
+            _transforms.compose(transforms),
+            mode=data_config.region_annotation_mode,
+        )
     return TransformedDataset(
         dataset,
         transforms,
@@ -292,9 +296,9 @@ def create_data_loader(
     if region_guidance is not None:
         if framework != "jax" or not isinstance(config.data, _config.LeRobotPiperDataConfig):
             raise ValueError("Region guidance currently supports only the JAX LeRobotPiperDataConfig pipeline")
-        if data_config.region_annotations_dir is None:
-            raise ValueError("Region guidance requires region_annotations_dir")
-    elif data_config.region_annotations_dir is not None:
+        if not data_config.region_annotations_embedded:
+            raise ValueError("Region guidance requires annotations embedded in the LeRobot dataset")
+    elif data_config.region_annotations_embedded:
         raise ValueError("Region annotation loading requires model.region_guidance to be enabled")
     logging.info(f"data_config: {data_config}")
 

@@ -240,7 +240,8 @@ def _record_region_guidance(config: _config.TrainConfig, *, resuming: bool):
         "num_train_steps": config.num_train_steps,
         "image_resolution": config.model.image_resolution,
         "dataset_root": config.data.dataset_root,
-        "annotations": config.data.base_config.region_annotations_dir,
+        "annotations": "embedded",
+        "annotation_mode": config.data.base_config.region_annotation_mode,
     }
     settings = json.loads(json.dumps(settings))
     if resuming:
@@ -259,13 +260,13 @@ def main(config: _config.TrainConfig):
     logging.info(f"Running on: {platform.node()}")
     guidance = getattr(config.model, "region_guidance", None)
     if guidance is not None:
-        from openpi.training.region_annotations import validate_annotation_source
+        from openpi.training.region_annotations import validate_embedded_annotations
 
         data_config = config.data.create(config.assets_dirs, config.model)
-        if data_config.region_annotations_dir is None or data_config.dataset_root is None:
-            raise ValueError("Region guidance requires local dataset_root and region_annotations_dir")
-        verified = validate_annotation_source(data_config.region_annotations_dir, data_config.dataset_root)
-        logging.info("Region annotation source verified: %d files", verified)
+        if data_config.dataset_root is None or not data_config.region_annotations_embedded:
+            raise ValueError("Region guidance requires embedded annotations in a local dataset_root")
+        verified = validate_embedded_annotations(data_config.dataset_root)
+        logging.info("Embedded region annotations verified: %d episodes", verified)
 
     if config.batch_size % jax.device_count() != 0:
         raise ValueError(

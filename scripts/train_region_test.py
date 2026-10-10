@@ -29,7 +29,7 @@ def test_resume_preserves_guidance_schedule_and_method(tmp_path):
         data=dataclasses.replace(
             base.data,
             dataset_root="/dataset",
-            base_config=dataclasses.replace(base.data.base_config, region_annotations_dir="/dataset/annotations"),
+            base_config=dataclasses.replace(base.data.base_config, region_annotations_embedded=True),
         ),
     )
     train._record_region_guidance(config, resuming=False)  # noqa: SLF001
@@ -97,9 +97,7 @@ def test_training_checkpoint_resume_and_original_policy_loading(tmp_path, monkey
         data=dataclasses.replace(
             base.data,
             dataset_root=str(tmp_path),
-            base_config=dataclasses.replace(
-                base.data.base_config, region_annotations_dir=str(tmp_path / "annotations")
-            ),
+            base_config=dataclasses.replace(base.data.base_config, region_annotations_embedded=True),
         ),
     )
     obs = model_config.fake_obs()
@@ -119,7 +117,7 @@ def test_training_checkpoint_resume_and_original_policy_loading(tmp_path, monkey
             return _config.DataConfig()
 
     monkeypatch.setattr(train._data_loader, "create_data_loader", lambda *a, **k: Loader())  # noqa: SLF001
-    monkeypatch.setattr(region_annotations, "validate_annotation_source", lambda *a: 0)
+    monkeypatch.setattr(region_annotations, "validate_embedded_annotations", lambda *a: 0)
     monkeypatch.setattr(train, "init_wandb", lambda *a, **k: None)
     metrics = []
     monkeypatch.setattr(train.wandb, "log", lambda data, **k: metrics.append(data))

@@ -16,7 +16,7 @@ flowchart TD
     D --> E["动作预测"]
     E --> F["原有 Flow Matching 动作损失"]
 
-    G["独立保存的区域标注"] --> H["匹配当前帧并生成区域掩码"]
+    G["当前样本内嵌的 bbox 字段"] --> H["生成当前帧区域掩码"]
     H --> I["与图像同步缩放、填充和几何增强"]
     I --> J["计算每个图像 patch 的区域覆盖率"]
     K["训练步数决定强度与保留概率"] --> L["生成注意力偏置"]
@@ -24,13 +24,14 @@ flowchart TD
     L --> D
 ```
 
-新增的数据包装器 `RegionAnnotatedDataset` 从 `annotations/all_frames.parquet` 读取标注，按下面三个字段匹配当前相机帧：
+新增的数据包装器 `RegionAnnotatedDataset` 直接从当前 LeRobot sample 读取两个字段：
 
 ```text
-episode_index + frame_index + camera
+observation.region.hand_right.book_bbox_xyxy
+observation.region.hand_right.title_bbox_xyxy
 ```
 
-它会再核对全局帧索引、时间戳和原图尺寸，避免把另一帧的标注加到当前图像上。训练启动时，还会根据标注的源文件清单核验数据文件大小与 SHA256，防止数据集与标注配错。
+这两个字段和图像、状态、动作位于同一 episode parquet 的同一行，不再进行外部表 join。数据转换阶段会逐帧核对 episode、frame、全局 index 和 timestamp；训练启动时会校验 `meta/info.json`、Parquet 字段类型、episode 数和总帧数。
 
 每个样本新增两个可选字段：
 
@@ -39,9 +40,7 @@ region_masks   # 各相机的区域掩码
 region_valid   # 各相机的标注是否有效
 ```
 
-对你目前这份数据，实际使用的是 **黑色标签的多边形 `label_polygon_xy`**，它会被还原成像素级掩码。没有使用几何估计的整条 `spine_roi`。
-
-原标注中的 `use_for_region_loss` 在这里仅作为“该区域是否可用”的标志，**虽然字段名带有 loss，但实现没有增加区域损失。**
+对你目前这份数据，`book` 模式使用整本书的 xyxy 框，`title` 模式使用书名框，`both` 模式取两者并集。无有效框的字段是 `[-1, -1, -1, -1]`。
 
 无有效标注的帧仍然参加正常动作训练，只是区域偏置为零。缺失的左腕相机也会得到零掩码和无效标志。因此，这个方法没有通过筛掉无标注样本来改变原来的训练样本集合。
 
@@ -227,25 +226,22 @@ return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
 **原方法的启动、部署和 checkpoint 兼容性也做了对应处理。**
 
-模型配置默认：
+普通模型配置默认：
 
 ```python
 region_guidance = None
 ```
 
-只有在启动命令中显式添加：
+使用普通配置时，只有在启动命令中显式添加：
 
 ```bash
 --region-guidance
 ```
 
-才会启用。标注目录默认是：
-
-```text
-<dataset-dir>/annotations
-```
-
-可以用 `--region-annotations-dir` 单独指定。其他主要参数为：
+才会启用。命名配置 `pi05_piper_full_finetune_rtc_attention_bias` 已经内置
+`region_guidance`，选择该配置后不需要重复传这个开关；只有覆盖下列默认参数时才需要
+显式传入。bbox 直接从 `--dataset-dir` 指向的 LeRobot episode parquet 读取，没有
+额外标注目录参数。其他主要参数为：
 
 ```bash
 --region-bias-strength 0.5
@@ -287,7 +283,10 @@ region/valid_fraction/<camera>
 
 **目前验证的是实现可用和兼容性，任务效果还没有得到验证。**
 
-已有的[验证报告](/tmp/openpi_region_guidance_smoke/report.json)记录了 71 项相关测试通过，覆盖偏置作用范围、硬遮罩保持、掩码对齐、原数据张量一致性、梯度、checkpoint 恢复和无标注推理等；真实数据、真实基础权重的 GPU 短程检查也已通过。原数据文件的内容及修改时间保持不变。
+当前与嵌入式标注链路相关的 45 项测试已通过，覆盖字段校验、掩码对齐、偏置作用范围、
+梯度、checkpoint 恢复和无标注推理等。当前 `origin` 数据集的 episode parquet 和
+`meta/info.json` 已被转换脚本更新；转换前版本保存在数据集旁的
+`origin.region_backup_20261010_152043`，视频文件没有修改。
 
 这里也纠正一下我前面关于分辨率测试范围的表述：**真实数据的 region-guidance GPU 检查做的是 448×448；新增小模型测试主要使用 28×28。不能说 224、336、448 都分别完成了完整的引导训练端到端验证。** 代码按 patch 网格适配这些合法分辨率，但支持范围与实测范围需要区分。
 

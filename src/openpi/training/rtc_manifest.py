@@ -192,7 +192,9 @@ def restore_config(config, manifest, checkpoint_dir):
         config.data,
         assets=configs.AssetsConfig(assets_dir=assets_dir, asset_id=asset_id),
         norm_stats_dir=str(pathlib.Path(assets_dir) / asset_id),
-        base_config=dataclasses.replace(config.data.base_config or configs.DataConfig(), region_annotations_dir=None),
+        base_config=dataclasses.replace(
+            config.data.base_config or configs.DataConfig(), region_annotations_embedded=False
+        ),
     )
     return configs.resolve_training_config(
         dataclasses.replace(config, model=model, data=data, training_rtc=rtc_values(manifest["training_rtc"]))

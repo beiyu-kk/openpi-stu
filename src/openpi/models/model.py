@@ -109,7 +109,7 @@ class Observation(Generic[ArrayT]):
     # Episode padding for action windows; only used by training RTC.
     action_is_pad: at.Bool[ArrayT, "*b ah"] | None = None
 
-    # Optional training sidecars. These never enter the policy's image/state inputs.
+    # Training-only region guidance metadata. These never enter deployed policy inputs.
     region_masks: dict[str, at.Float[ArrayT, "*b h w"]] | None = None
     region_valid: dict[str, at.Bool[ArrayT, "*b"]] | None = None
 

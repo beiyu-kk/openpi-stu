@@ -38,6 +38,13 @@ def test_piper_finetune_configs():
     assert lora.data.norm_stats_dir is None
     assert lora.data.assets.asset_id is None
 
+    attention_bias = _config.get_config("pi05_piper_full_finetune_rtc_attention_bias")
+    assert attention_bias.model.pi05
+    assert attention_bias.training_rtc is not None
+    assert attention_bias.training_rtc.finetune_mode == "full"
+    assert attention_bias.model.region_guidance is not None
+    assert attention_bias.data.base_config.region_annotation_mode == "book"
+
 
 def test_checkpoint_dir_override(tmp_path):
     config = _config.get_config("pi05_piper_full_finetune")
