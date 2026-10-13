@@ -3,8 +3,9 @@
 LocateAnything 的模型源码已内置到 `openpi.models.stl`。STL 与 OpenPI 共用一个 Python
 环境，在调用进程内加载模型；不需要单独启动终端服务。
 
-本次范围是 STL 模块及独立调用脚本。没有修改 Piper policy、Pi05 模型、训练配置、
-数据流、根 `pyproject.toml` 或 `uv.lock`。因此，当前不会自动触发关键帧定位，也不会改变训练行为。
+STL 模块及独立调用脚本不会自动触发关键帧定位，也不会改变 Piper policy、Pi05 模型、
+训练配置或数据流。经过验证的 STL 依赖已经合并到根 `pyproject.toml` 和 `uv.lock`，
+新环境可直接通过项目锁文件复现。
 
 ## 目录
 
@@ -40,28 +41,25 @@ Pillow 11.2.1、PEFT 0.12.0、Accelerate 1.5.2。
 在仓库根目录运行：
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/check_stl_environment.py
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/stl/check_stl_environment.py
 ```
 
-当前环境已具备单图所需依赖。其他机器需先准备 OpenPI 环境，再安装 STL 的固定版本清单：
+其他机器在仓库根目录同步项目环境即可安装匹配的 OpenPI 与 STL 依赖：
 
 ```bash
-uv --no-config pip install --python .venv/bin/python \
-  -r src/openpi/models/stl/requirements-openpi.txt
+uv sync --frozen
 ```
 
-此命令直接操作指定解释器，不修改根依赖文件；不要为 STL 升级 OpenPI 的 Transformers
-或覆盖 OpenPI 已使用的 Transformers 适配文件。清单固定直接依赖，不代替完整 CUDA 系统环境锁定。
-本次只验证现有环境，没有执行上述重装命令。
+`requirements-openpi.txt` 保留为 STL 核心版本的独立参考清单，根项目依赖是实际安装来源。
+不要单独升级 PyTorch、torchvision、Transformers 或 tokenizers；这些包按已验证组合固定。
+项目锁文件不代替 NVIDIA 驱动和 CUDA 系统环境。
 
 单图默认采用文本 SDPA，视觉 `auto` 在没有 FlashAttention 时采用 SDPA。
 不要求安装 `flash-attn`、`magi_attention`、`decord` 或 `lmdb`。
 LMDB 输入和视频读取需要各自后端，见依赖清单注释。可选加速后端尚未做 GPU 验证。
 
-当前工作区另有两个已有环境问题：根 `pyproject.toml` 的 OpenCV 依赖行末包含多余字符，
-会使 `uv run`/`uv sync` 的 TOML 解析失败；`uv pip check` 会报告已安装 Decord wheel
-的平台标签不匹配。两者均未在本次范围外修改。直接使用 `.venv/bin/python` 的 STL 单图入口
-已通过验证；`check_stl_environment.py` 检查的是 STL 所需版本及共同导入，不代表全部已安装包均通过检查。
+`check_stl_environment.py` 检查 STL 固定版本及其与 OpenPI 的共同导入；`uv pip check`
+用于检查整个已安装环境的包依赖关系。
 
 ## 单图复现
 

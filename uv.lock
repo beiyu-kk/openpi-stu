@@ -38,6 +38,7 @@ overrides = [
     { name = "ml-dtypes", specifier = "==0.4.1" },
     { name = "tensorstore", specifier = "==0.1.74" },
 ]
+excludes = ["opencv-python-headless"]
 
 [[package]]
 name = "absl-py"
@@ -46,6 +47,24 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/03/15/18693af986560a5c3cc0b84a8046b536ffb2cdb536e03cce897f2759e284/absl_py-2.3.0.tar.gz", hash = "sha256:d96fda5c884f1b22178852f30ffa85766d50b99e00775ea626c23304f582fc4f", size = 116400, upload-time = "2025-05-27T09:15:50.143Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/87/04/9d75e1d3bb4ab8ec67ff10919476ccdee06c098bcfcf3a352da5f985171d/absl_py-2.3.0-py3-none-any.whl", hash = "sha256:9824a48b654a306168f63e0d97714665f8490b8d89ec7bf2efc24bf67cf579b3", size = 135657, upload-time = "2025-05-27T09:15:48.742Z" },
+]
+
+[[package]]
+name = "accelerate"
+version = "1.5.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "psutil" },
+    { name = "pyyaml" },
+    { name = "safetensors" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a9/4c/a61132924da12cef62a88c04b5825246ab83dcc1bae6291d098cfcb0b72d/accelerate-1.5.2.tar.gz", hash = "sha256:a1cf39473edc0e42772a9d9a18c9eb1ce8ffd9e1719dc0ab80670f5c1fd4dc43", size = 352341, upload-time = "2025-03-14T14:14:55.575Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/70/83/167d4b638bb758a966828eb8d23c5e7047825edfdf768ff5f4fb01440063/accelerate-1.5.2-py3-none-any.whl", hash = "sha256:68a3b272f6a6ffebb457bdc138581a2bf52efad6a5e0214dc46675f3edd98792", size = 345146, upload-time = "2025-03-14T14:14:53.777Z" },
 ]
 
 [[package]]
@@ -2149,7 +2168,6 @@ dependencies = [
     { name = "jsonlines" },
     { name = "numba" },
     { name = "omegaconf" },
-    { name = "opencv-python-headless" },
     { name = "packaging" },
     { name = "pymunk" },
     { name = "pynput" },
@@ -3328,27 +3346,11 @@ wheels = [
 ]
 
 [[package]]
-name = "opencv-python-headless"
-version = "4.11.0.86"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/36/2f/5b2b3ba52c864848885ba988f24b7f105052f68da9ab0e693cc7c25b0b30/opencv-python-headless-4.11.0.86.tar.gz", hash = "sha256:996eb282ca4b43ec6a3972414de0e2331f5d9cda2b41091a49739c19fb843798", size = 95177929, upload-time = "2025-01-16T13:53:40.22Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/dc/53/2c50afa0b1e05ecdb4603818e85f7d174e683d874ef63a6abe3ac92220c8/opencv_python_headless-4.11.0.86-cp37-abi3-macosx_13_0_arm64.whl", hash = "sha256:48128188ade4a7e517237c8e1e11a9cdf5c282761473383e77beb875bb1e61ca", size = 37326460, upload-time = "2025-01-16T13:52:57.015Z" },
-    { url = "https://files.pythonhosted.org/packages/3b/43/68555327df94bb9b59a1fd645f63fafb0762515344d2046698762fc19d58/opencv_python_headless-4.11.0.86-cp37-abi3-macosx_13_0_x86_64.whl", hash = "sha256:a66c1b286a9de872c343ee7c3553b084244299714ebb50fbdcd76f07ebbe6c81", size = 56723330, upload-time = "2025-01-16T13:55:45.731Z" },
-    { url = "https://files.pythonhosted.org/packages/45/be/1438ce43ebe65317344a87e4b150865c5585f4c0db880a34cdae5ac46881/opencv_python_headless-4.11.0.86-cp37-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:6efabcaa9df731f29e5ea9051776715b1bdd1845d7c9530065c7951d2a2899eb", size = 29487060, upload-time = "2025-01-16T13:51:59.625Z" },
-    { url = "https://files.pythonhosted.org/packages/dd/5c/c139a7876099916879609372bfa513b7f1257f7f1a908b0bdc1c2328241b/opencv_python_headless-4.11.0.86-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:0e0a27c19dd1f40ddff94976cfe43066fbbe9dfbb2ec1907d66c19caef42a57b", size = 49969856, upload-time = "2025-01-16T13:53:29.654Z" },
-    { url = "https://files.pythonhosted.org/packages/95/dd/ed1191c9dc91abcc9f752b499b7928aacabf10567bb2c2535944d848af18/opencv_python_headless-4.11.0.86-cp37-abi3-win32.whl", hash = "sha256:f447d8acbb0b6f2808da71fddd29c1cdd448d2bc98f72d9bb78a7a898fc9621b", size = 29324425, upload-time = "2025-01-16T13:52:49.048Z" },
-    { url = "https://files.pythonhosted.org/packages/86/8a/69176a64335aed183529207ba8bc3d329c2999d852b4f3818027203f50e6/opencv_python_headless-4.11.0.86-cp37-abi3-win_amd64.whl", hash = "sha256:6c304df9caa7a6a5710b91709dd4786bf20a74d57672b3c31f7033cc638174ca", size = 39402386, upload-time = "2025-01-16T13:52:56.418Z" },
-]
-
-[[package]]
 name = "openpi"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "accelerate" },
     { name = "augmax" },
     { name = "beartype" },
     { name = "chex" },
@@ -3361,6 +3363,7 @@ dependencies = [
     { name = "flax" },
     { name = "fsspec", extra = ["gcs"] },
     { name = "gym-aloha" },
+    { name = "huggingface-hub" },
     { name = "imageio" },
     { name = "jax", extra = ["cuda12"] },
     { name = "jaxtyping" },
@@ -3372,14 +3375,21 @@ dependencies = [
     { name = "opencv-python" },
     { name = "openpi-client" },
     { name = "orbax-checkpoint" },
+    { name = "packaging" },
+    { name = "peft" },
     { name = "pillow" },
     { name = "piper-sdk" },
     { name = "polars" },
+    { name = "pyarrow" },
     { name = "pyclipper" },
     { name = "pyrealsense2" },
+    { name = "requests" },
     { name = "rich" },
+    { name = "safetensors" },
     { name = "sentencepiece" },
+    { name = "tokenizers" },
     { name = "torch" },
+    { name = "torchvision" },
     { name = "tqdm-loggable" },
     { name = "transformers" },
     { name = "treescope" },
@@ -3406,6 +3416,7 @@ rlds = [
 
 [package.metadata]
 requires-dist = [
+    { name = "accelerate", specifier = "==1.5.2" },
     { name = "augmax", specifier = ">=0.3.4" },
     { name = "beartype", specifier = "==0.19.0" },
     { name = "chex", specifier = "==0.1.90" },
@@ -3417,25 +3428,33 @@ requires-dist = [
     { name = "flax", specifier = "==0.10.2" },
     { name = "fsspec", extras = ["gcs"], specifier = ">=2024.6.0" },
     { name = "gym-aloha", specifier = ">=0.1.1" },
+    { name = "huggingface-hub", specifier = "==0.32.3" },
     { name = "imageio", specifier = ">=2.36.1" },
     { name = "jax", extras = ["cuda12"], specifier = "==0.5.3" },
     { name = "jaxtyping", specifier = "==0.2.36" },
     { name = "lerobot", git = "https://github.com/huggingface/lerobot?rev=0cf864870cf29f4738d3ade893e6fd13fbd7cdb5" },
     { name = "ml-collections", specifier = "==1.0.0" },
-    { name = "modelscope", specifier = ">=1.39.1" },
-    { name = "numpy", specifier = ">=1.22.4,<2.0.0" },
+    { name = "modelscope", specifier = "==1.40.1" },
+    { name = "numpy", specifier = "==1.26.4" },
     { name = "numpydantic", specifier = ">=1.6.6" },
-    { name = "opencv-python", specifier = ">=4.10.0.84" },
+    { name = "opencv-python", specifier = "==4.11.0.86" },
     { name = "openpi-client", editable = "packages/openpi-client" },
     { name = "orbax-checkpoint", specifier = "==0.11.13" },
-    { name = "pillow", specifier = ">=11.0.0" },
+    { name = "packaging", specifier = "==25.0" },
+    { name = "peft", specifier = "==0.12.0" },
+    { name = "pillow", specifier = "==11.2.1" },
     { name = "piper-sdk", specifier = ">=0.6.2" },
     { name = "polars", specifier = ">=1.30.0" },
+    { name = "pyarrow", specifier = "==20.0.0" },
     { name = "pyclipper", specifier = "==1.3.0.post6" },
     { name = "pyrealsense2", specifier = ">=2.58.4" },
+    { name = "requests", specifier = "==2.32.3" },
     { name = "rich", specifier = ">=14.0.0" },
+    { name = "safetensors", specifier = "==0.5.3" },
     { name = "sentencepiece", specifier = ">=0.2.0" },
+    { name = "tokenizers", specifier = "==0.21.1" },
     { name = "torch", specifier = "==2.7.1" },
+    { name = "torchvision", specifier = "==0.22.1" },
     { name = "tqdm-loggable", specifier = ">=0.2" },
     { name = "transformers", specifier = "==4.53.2" },
     { name = "treescope", specifier = ">=0.1.7" },
@@ -3605,6 +3624,27 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/66/94/68e2e17afaa9169cf6412ab0f28623903be73d1b32e208d9e8e541bb086d/parso-0.8.4.tar.gz", hash = "sha256:eb3a7b58240fb99099a345571deecc0f9540ea5f4dd2fe14c2a99d6b281ab92d", size = 400609, upload-time = "2024-04-05T09:43:55.897Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c6/ac/dac4a63f978e4dcb3c6d3a78c4d8e0192a113d288502a1216950c41b1027/parso-0.8.4-py2.py3-none-any.whl", hash = "sha256:a418670a20291dacd2dddc80c377c5c3791378ee1e8d12bffc35420643d43f18", size = 103650, upload-time = "2024-04-05T09:43:53.299Z" },
+]
+
+[[package]]
+name = "peft"
+version = "0.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "accelerate" },
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "psutil" },
+    { name = "pyyaml" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "tqdm" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7d/e7/78c28a875fe189be4c34f29f7ac4b33c04ccd7ae5382bbec97fe44205507/peft-0.12.0.tar.gz", hash = "sha256:253205bd478e985ccdc7f04804aab9c95f479130c517bf6e474b8d509db5f4a4", size = 314010, upload-time = "2024-07-24T11:52:54.752Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/72/fcabddf222ec938c3cbd5616e5a72796938b5235897e07a1fcc2a8e7735e/peft-0.12.0-py3-none-any.whl", hash = "sha256:a47915efb08af50e9fda267b7bf1b5b6eff33ccbb08791bdb544dccb8788f674", size = 296377, upload-time = "2024-07-24T11:52:50.214Z" },
 ]
 
 [[package]]
