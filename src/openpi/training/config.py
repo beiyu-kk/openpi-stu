@@ -522,7 +522,7 @@ _CONFIGS = [
     #
     TrainConfig(
         name="pi05_piper_full_finetune",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=30),
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, image_resolution=(224, 224)),
         data=LeRobotPiperDataConfig(
             base_config=DataConfig(prompt_from_task=True),
             use_delta_actions=True,
@@ -542,6 +542,7 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=30,
+            image_resolution=(224, 224),
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
         ),
@@ -555,6 +556,7 @@ _CONFIGS = [
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=30,
+            image_resolution=(224, 224),
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
         ).get_freeze_filter(),
@@ -568,8 +570,8 @@ _CONFIGS = [
     # RTC is enabled only by training_rtc; the launcher needs no separate RTC flag.
     TrainConfig(
         name="pi05_piper_full_finetune_rtc",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=30),
-        training_rtc=TrainingRTCConfig(finetune_mode="full"),
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, image_resolution=(224, 224)),
+        training_rtc=TrainingRTCConfig(finetune_mode="full", max_delay=4),
         data=LeRobotPiperDataConfig(base_config=DataConfig(prompt_from_task=True)),
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
@@ -589,9 +591,41 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=30,
+            image_resolution=(224, 224),
             region_guidance=pi0_config.RegionGuidanceConfig(),
         ),
-        training_rtc=TrainingRTCConfig(finetune_mode="full"),
+        training_rtc=TrainingRTCConfig(finetune_mode="full", max_delay=4),
+        data=LeRobotPiperDataConfig(
+            base_config=DataConfig(prompt_from_task=True, region_annotation_mode="book"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=500, peak_lr=1e-5, decay_steps=10000, decay_lr=1e-6),
+        batch_size=32,
+        num_train_steps=10000,
+        save_interval=1000,
+        keep_period=5000,
+        ema_decay=None,
+    ),
+    # Separate delay-9 preset for 30 Hz deployments whose inference latency
+    # at 448x448 exceeds the original four-tick RTC window.
+    TrainConfig(
+        name="pi05_piper_full_finetune_rtc_attention_bias_448_d9",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            image_resolution=(448, 448),
+            region_guidance=pi0_config.RegionGuidanceConfig(),
+        ),
+        training_rtc=TrainingRTCConfig(
+            finetune_mode="full",
+            max_delay=9,
+            # At 30 Hz, the measured 223-232 ms round trip maps to delay 8
+            # after the client's one-tick safety margin. Delay 9 covers tail
+            # latency while delay 8 remains the most frequently sampled case.
+            delay_weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 4.0, 12.0, 6.0),
+        ),
         data=LeRobotPiperDataConfig(
             base_config=DataConfig(prompt_from_task=True, region_annotation_mode="book"),
         ),
@@ -607,8 +641,13 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_piper_lora_finetune_rtc",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, action_expert_variant="gemma_300m_lora"),
-        training_rtc=TrainingRTCConfig(finetune_mode="lora"),
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            image_resolution=(224, 224),
+            action_expert_variant="gemma_300m_lora",
+        ),
+        training_rtc=TrainingRTCConfig(finetune_mode="lora", max_delay=4),
         data=LeRobotPiperDataConfig(base_config=DataConfig(prompt_from_task=True)),
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True

@@ -38,12 +38,35 @@ def test_piper_finetune_configs():
     assert lora.data.norm_stats_dir is None
     assert lora.data.assets.asset_id is None
 
+    full_rtc = _config.get_config("pi05_piper_full_finetune_rtc")
+    assert full_rtc.model.image_resolution == (224, 224)
+    assert full_rtc.training_rtc is not None
+    assert full_rtc.training_rtc.max_delay == 4
+
+    lora_rtc = _config.get_config("pi05_piper_lora_finetune_rtc")
+    assert lora_rtc.model.image_resolution == (224, 224)
+    assert lora_rtc.training_rtc is not None
+    assert lora_rtc.training_rtc.max_delay == 4
+
     attention_bias = _config.get_config("pi05_piper_full_finetune_rtc_attention_bias")
     assert attention_bias.model.pi05
     assert attention_bias.training_rtc is not None
     assert attention_bias.training_rtc.finetune_mode == "full"
+    assert attention_bias.training_rtc.max_delay == 4
+    assert attention_bias.model.image_resolution == (224, 224)
     assert attention_bias.model.region_guidance is not None
     assert attention_bias.data.base_config.region_annotation_mode == "book"
+
+    attention_bias_d9 = _config.get_config("pi05_piper_full_finetune_rtc_attention_bias_448_d9")
+    assert attention_bias_d9.training_rtc is not None
+    assert attention_bias_d9.training_rtc.max_delay == 9
+    expected_delay_weights = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 4.0, 12.0, 6.0)
+    assert attention_bias_d9.training_rtc.delay_weights == expected_delay_weights
+    assert attention_bias_d9.model.image_resolution == (448, 448)
+    assert attention_bias_d9.model.simulated_delay == 10
+    assert attention_bias_d9.model.simulated_delay_weights == expected_delay_weights
+    assert attention_bias_d9.model.region_guidance is not None
+    assert attention_bias_d9.data.base_config.region_annotation_mode == "book"
 
 
 def test_checkpoint_dir_override(tmp_path):
