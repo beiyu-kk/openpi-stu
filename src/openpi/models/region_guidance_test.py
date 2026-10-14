@@ -59,8 +59,8 @@ def test_schedule(step, expected):
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"strength": -1},
-        {"strength": float("nan")},
+        {"attention_bias_scale": -1},
+        {"attention_bias_scale": float("nan")},
         {"keep_probability": 1.1},
         {"decay_start": 0.8},
         {"decay_end": 1},

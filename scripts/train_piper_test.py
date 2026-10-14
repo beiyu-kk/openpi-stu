@@ -235,7 +235,7 @@ def test_region_guidance_is_opt_in(tmp_path, monkeypatch, enabled, image_size):
     assert base.model.region_guidance is None
     assert not base.data.base_config.region_annotations_embedded
     if enabled:
-        assert config.model.region_guidance.strength == 0.5
+        assert config.model.region_guidance.attention_bias_scale == 0.5
         assert config.data.base_config.region_annotations_embedded
     else:
         assert config.model.region_guidance is None
@@ -278,3 +278,41 @@ def test_region_guidance_prefers_embedded_annotations(tmp_path, monkeypatch):
 
     config = train_piper._build_config(train_piper._parse_args())  # noqa: SLF001
     assert config.data.base_config.region_annotations_embedded
+
+
+def test_attention_bias_scale_can_be_overridden_without_rebuilding_the_config(tmp_path, monkeypatch):
+    dataset_dir = tmp_path / "dataset"
+    (dataset_dir / "meta").mkdir(parents=True)
+    (dataset_dir / "data").mkdir(parents=True)
+    feature = {"dtype": "float32", "shape": [4], "names": ["x1", "y1", "x2", "y2"]}
+    (dataset_dir / "meta/info.json").write_text(
+        json.dumps(
+            {
+                "features": {
+                    "observation.region.hand_right.book_bbox_xyxy": feature,
+                    "observation.region.hand_right.title_bbox_xyxy": feature,
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_piper.py",
+            "--config",
+            "pi05_piper_full_finetune_rtc_attention_bias",
+            "--dataset-dir",
+            str(dataset_dir),
+            "--dataset-repo-id",
+            "local/book",
+            "--exp-name",
+            "test",
+            "--base-model-dir",
+            "gs://bucket/base",
+            "--attention-bias-scale",
+            "1.75",
+        ],
+    )
+    config = train_piper._build_config(train_piper._parse_args())  # noqa: SLF001
+    assert config.model.region_guidance.attention_bias_scale == 1.75

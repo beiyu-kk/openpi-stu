@@ -25,7 +25,7 @@ patch 覆盖率位于 `[0, 1]`，表示该 patch 中属于 bbox 区域的像素�
 有效 sample，bias 是：
 
 ```text
-attention_logit_new = attention_logit + strength * patch_coverage
+attention_logit_new = attention_logit + attention_bias_scale * patch_coverage
 ```
 
 bias 只作用在指定 Transformer 层和 query head 的 action token 到右腕图像 token
@@ -101,13 +101,13 @@ uv run --frozen scripts/train_piper.py \
 
 ## 4. 调整 bias 超参数
 
-新配置的默认值为：`strength=0.5`、`keep_probability=0.5`、从 30% 训练进度开始
+新配置的默认值为：`attention_bias_scale=0.5`、`keep_probability=0.5`、从 30% 训练进度开始
 退火、70% 时变为零；默认选择中间两层和前四分之一 attention heads。
 
 若需要覆盖这些默认值，在命令中加入 `--region-guidance`，再按需传入：
 
 ```bash
---region-bias-strength 0.5 \
+--attention-bias-scale 0.5 \
 --region-keep-probability 0.5 \
 --region-decay-start 0.3 \
 --region-decay-end 0.7 \

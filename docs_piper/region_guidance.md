@@ -55,7 +55,7 @@ count. Field locations, conversion, and inspection commands are documented in
 | --- | --- |
 | Region source | Embedded book/title xyxy bbox from the right-wrist image |
 | Eligibility | A valid positive-area bbox; `[-1, -1, -1, -1]` means unavailable |
-| Initial bias | 0.5 |
+| Initial attention bias multiplier | `attention_bias_scale=0.5` |
 | Initial keep probability | 0.5 per example and camera |
 | Constant phase | First 30% of optimizer steps |
 | Linear decay | 30% through 70% of optimizer steps |
@@ -64,14 +64,24 @@ count. Field locations, conversion, and inspection commands are documented in
 | Query heads | First quarter; indices 0 and 1 for pi0.5 |
 | Attention path | Action queries to image keys only |
 
-At 10,000 steps, strength/probability are 0.5/0.5 through step 3000,
+At 10,000 steps, attention-bias-scale/probability are 0.5/0.5 through step 3000,
 0.25/0.25 at step 5000, and exactly zero from step 7000 onward.
 The decay uses the checkpoint's optimizer step, not the data-loader position.
 
-Optional overrides:
+The multiplier is explicit in the model TrainConfig:
+
+```python
+region_guidance=RegionGuidanceConfig(attention_bias_scale=1.5)
+```
+
+At the start of training, `attention_bias_scale=1.5` adds `+1.5` to a fully
+covered patch's pre-softmax attention logit; 40% coverage adds `+0.6`. The
+configured scale is then reduced by the decay schedule.
+
+Optional command-line overrides:
 
 ```text
---region-bias-strength 0.5
+--attention-bias-scale 1.5
 --region-keep-probability 0.5
 --region-decay-start 0.3
 --region-decay-end 0.7
@@ -97,7 +107,7 @@ has a 32-by-32 patch grid.
 For the selected layers and heads, action queries receive:
 
 ```text
-logits' = logits + strength(step) * keep_gate * patch_coverage
+logits' = logits + attention_bias_scale(step) * keep_gate * patch_coverage
 ```
 
 The original hard attention mask is applied afterward. Language keys, action

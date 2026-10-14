@@ -592,7 +592,7 @@ _CONFIGS = [
             pi05=True,
             action_horizon=30,
             image_resolution=(224, 224),
-            region_guidance=pi0_config.RegionGuidanceConfig(),
+            region_guidance=pi0_config.RegionGuidanceConfig(attention_bias_scale=0.5),
         ),
         training_rtc=TrainingRTCConfig(finetune_mode="full", max_delay=4),
         data=LeRobotPiperDataConfig(
@@ -616,7 +616,7 @@ _CONFIGS = [
             pi05=True,
             action_horizon=30,
             image_resolution=(448, 448),
-            region_guidance=pi0_config.RegionGuidanceConfig(),
+            region_guidance=pi0_config.RegionGuidanceConfig(attention_bias_scale=1),
         ),
         training_rtc=TrainingRTCConfig(
             finetune_mode="full",

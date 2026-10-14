@@ -180,9 +180,9 @@ e^{0.5}\approx1.65
 例如训练 10,000 步：
 
 ```text
-step 0～3000：strength=0.5，keep_probability=0.5
-step 5000：  strength=0.25，keep_probability=0.25
-step ≥7000： strength=0，keep_probability=0
+step 0～3000：attention_bias_scale=0.5，keep_probability=0.5
+step 5000：  attention_bias_scale=0.25，keep_probability=0.25
+step ≥7000： attention_bias_scale=0，keep_probability=0
 ```
 
 强度和概率同时下降，所以平均引导量会比单独线性下降强度衰减得更快。
@@ -244,7 +244,7 @@ region_guidance = None
 额外标注目录参数。其他主要参数为：
 
 ```bash
---region-bias-strength 0.5
+--attention-bias-scale 0.5
 --region-keep-probability 0.5
 --region-decay-start 0.3
 --region-decay-end 0.7

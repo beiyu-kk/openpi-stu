@@ -48,6 +48,13 @@ def model_values(values):
         values["simulated_delay_weights"] = tuple(values["simulated_delay_weights"])
     if values.get("region_guidance") is not None:
         guidance = dict(values["region_guidance"])
+        # Checkpoints written before ``attention_bias_scale`` was exposed used
+        # the internal field name ``strength``.  Read those manifests without
+        # changing the new canonical configuration schema.
+        if "attention_bias_scale" not in guidance and "strength" in guidance:
+            guidance["attention_bias_scale"] = guidance.pop("strength")
+        else:
+            guidance.pop("strength", None)
         for name in ("layers", "heads"):
             if guidance.get(name) is not None:
                 guidance[name] = tuple(guidance[name])

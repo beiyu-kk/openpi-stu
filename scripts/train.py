@@ -220,6 +220,7 @@ def train_step(
     }
     if guidance is not None:
         info["region/strength"] = strength
+        info["region/attention_bias_scale"] = strength
         info["region/keep_probability"] = probability
         for camera, valid in observation.region_valid.items():
             info[f"region/valid_fraction/{camera}"] = jnp.mean(valid.astype(jnp.float32))

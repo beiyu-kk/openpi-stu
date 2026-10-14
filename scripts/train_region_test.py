@@ -25,7 +25,7 @@ def test_resume_preserves_guidance_schedule_and_method(tmp_path):
         checkpoint_dir_override=str(tmp_path),
         exp_name="region_test",
         num_train_steps=10000,
-        model=dataclasses.replace(base.model, region_guidance=RegionGuidanceConfig()),
+        model=dataclasses.replace(base.model, region_guidance=RegionGuidanceConfig(attention_bias_scale=0.5)),
         data=dataclasses.replace(
             base.data,
             dataset_root="/dataset",

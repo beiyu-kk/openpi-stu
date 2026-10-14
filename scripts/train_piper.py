@@ -98,9 +98,11 @@ def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
         guidance = getattr(model, "region_guidance", None) or RegionGuidanceConfig()
         # CLI values are overrides only when the opt-in flag is explicit. The
         # named config otherwise retains its registered guidance settings.
-        if getattr(args, "region_guidance", False):
-            guidance = RegionGuidanceConfig(
-                strength=args.region_bias_strength,
+        scale = getattr(args, "region_bias_strength", None)
+        if getattr(args, "region_guidance", False) or scale is not None:
+            guidance = dataclasses.replace(
+                guidance,
+                attention_bias_scale=guidance.attention_bias_scale if scale is None else scale,
                 keep_probability=args.region_keep_probability,
                 decay_start=args.region_decay_start,
                 decay_end=args.region_decay_end,
@@ -186,7 +188,14 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Select book boxes, title boxes, their union, or no region for guidance.",
     )
-    parser.add_argument("--region-bias-strength", type=float, default=0.5)
+    parser.add_argument(
+        "--attention-bias-scale",
+        "--region-bias-strength",
+        dest="region_bias_strength",
+        type=float,
+        default=None,
+        help="Initial additive attention-logit multiplier; defaults to the selected TrainConfig.",
+    )
     parser.add_argument("--region-keep-probability", type=float, default=0.5)
     parser.add_argument(
         "--region-decay-start", type=float, default=0.3, help="Fraction of training before decay starts."

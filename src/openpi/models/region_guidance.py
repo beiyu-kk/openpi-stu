@@ -9,7 +9,9 @@ import jax.numpy as jnp
 
 @dataclasses.dataclass(frozen=True)
 class RegionGuidanceConfig:
-    strength: float = 0.5
+    # Initial additive attention-logit multiplier.  For a fully covered patch,
+    # the pre-softmax logit receives ``attention_bias_scale`` before decay.
+    attention_bias_scale: float = 0.5
     keep_probability: float = 0.5
     decay_start: float = 0.3
     decay_end: float = 0.7
@@ -18,8 +20,8 @@ class RegionGuidanceConfig:
     heads: tuple[int, ...] | None = None
 
     def __post_init__(self):
-        if not math.isfinite(self.strength) or self.strength < 0:
-            raise ValueError("Region guidance strength must be finite and nonnegative")
+        if not math.isfinite(self.attention_bias_scale) or self.attention_bias_scale < 0:
+            raise ValueError("Region attention_bias_scale must be finite and nonnegative")
         if not 0 <= self.keep_probability <= 1:
             raise ValueError("Region guidance keep_probability must be in [0, 1]")
         if not 0 <= self.decay_start < self.decay_end < 1:
@@ -49,7 +51,12 @@ class RegionGuidanceConfig:
             raise ValueError("total_steps must be positive")
         progress = jnp.asarray(step, dtype=jnp.float32) / total_steps
         factor = jnp.clip((self.decay_end - progress) / (self.decay_end - self.decay_start), 0.0, 1.0)
-        return self.strength * factor, self.keep_probability * factor
+        return self.attention_bias_scale * factor, self.keep_probability * factor
+
+    @property
+    def strength(self) -> float:
+        """Backward-compatible name for the scheduled initial scale."""
+        return self.attention_bias_scale
 
 
 def patch_coverage(masks, patch_size: int = 14):
