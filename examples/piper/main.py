@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import concurrent.futures
 import contextlib
+import ctypes
+import ctypes.util
 import dataclasses
 import logging
 import math
@@ -56,6 +59,7 @@ class Args:
     max_timesteps: int = 2000
     open_loop_horizon: int = 30
     control_hz: float = PIPER_CONTROL_FREQUENCY
+    inference_timeout_s: float = 30.0
     move_speed_percent: int = 30
     enable_timeout_s: float = 30.0
 
@@ -321,6 +325,7 @@ class CameraVisualizer:
         self._cv2 = None
         self._window_created = False
         self._last_window_size: tuple[int, int] | None = None
+        self._topmost_configured = False
 
         if self._enabled:
             if self._scale <= 0:
@@ -349,13 +354,95 @@ class CameraVisualizer:
             self._cv2.resizeWindow(self._window_name, *window_size)
             self._last_window_size = window_size
         self._cv2.imshow(self._window_name, preview_rgb[..., ::-1])
-        return (self._cv2.waitKey(1) & 0xFF) != ord("q")
+        key = self._cv2.waitKey(1) & 0xFF
+        if not self._topmost_configured:
+            self._topmost_configured = True
+            self._set_window_topmost()
+        return key != ord("q")
+
+    def _set_window_topmost(self) -> None:
+        assert self._cv2 is not None
+        try:
+            get_handle = getattr(self._cv2, "getWindowHandle", None)
+            if get_handle is not None and _set_x11_window_above(int(get_handle(self._window_name))):
+                logger.info("Set camera preview window '%s' to stay on top (X11).", self._window_name)
+                return
+        except Exception as exc:
+            logger.debug("X11 topmost request failed: %s", exc)
+        try:
+            supported = self._cv2.setWindowProperty(self._window_name, self._cv2.WND_PROP_TOPMOST, 1)
+            if supported is False:
+                raise RuntimeError("OpenCV window backend rejected WND_PROP_TOPMOST")
+        except (AttributeError, RuntimeError, self._cv2.error) as exc:
+            logger.warning("Could not make camera preview window '%s' stay on top: %s", self._window_name, exc)
 
     def close(self) -> None:
         if self._window_created:
             assert self._cv2 is not None
             self._cv2.destroyWindow(self._window_name)
             self._window_created = False
+
+
+def _set_x11_window_above(window_id: int) -> bool:
+    """Request the X11 window manager to add _NET_WM_STATE_ABOVE."""
+
+    class EventData(ctypes.Union):
+        _fields_ = [("l", ctypes.c_long * 5), ("pad", ctypes.c_char * 20)]  # noqa: RUF012
+
+    class ClientMessage(ctypes.Structure):
+        _fields_ = [  # noqa: RUF012
+            ("type", ctypes.c_int),
+            ("serial", ctypes.c_ulong),
+            ("send_event", ctypes.c_int),
+            ("display", ctypes.c_void_p),
+            ("window", ctypes.c_ulong),
+            ("message_type", ctypes.c_ulong),
+            ("format", ctypes.c_int),
+            ("data", EventData),
+        ]
+
+    class XEvent(ctypes.Union):
+        _fields_ = [("xclient", ClientMessage), ("pad", ctypes.c_long * 24)]  # noqa: RUF012
+
+    library = ctypes.util.find_library("X11")
+    if not library:
+        return False
+    x11 = ctypes.CDLL(library)
+    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    x11.XDefaultRootWindow.restype = ctypes.c_ulong
+    x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    x11.XInternAtom.restype = ctypes.c_ulong
+    x11.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_long, ctypes.POINTER(XEvent)]
+    x11.XSendEvent.restype = ctypes.c_int
+    x11.XFlush.argtypes = [ctypes.c_void_p]
+    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+
+    display = x11.XOpenDisplay(None)
+    if not display:
+        return False
+    try:
+        root = x11.XDefaultRootWindow(display)
+        state = x11.XInternAtom(display, b"_NET_WM_STATE", 0)
+        above = x11.XInternAtom(display, b"_NET_WM_STATE_ABOVE", 0)
+        if not state or not above:
+            return False
+        event = XEvent()
+        event.xclient.type = 33  # ClientMessage
+        event.xclient.send_event = 1
+        event.xclient.display = display
+        event.xclient.window = window_id
+        event.xclient.message_type = state
+        event.xclient.format = 32
+        event.xclient.data.l[0] = 1  # _NET_WM_STATE_ADD
+        event.xclient.data.l[1] = above
+        event.xclient.data.l[3] = 1  # application source indication
+        result = x11.XSendEvent(display, root, 0, (1 << 19) | (1 << 20), ctypes.byref(event))
+        x11.XFlush(display)
+        return result != 0
+    finally:
+        x11.XCloseDisplay(display)
 
 
 class PiperArm:
@@ -443,6 +530,8 @@ def _validate_args(args: Args) -> None:
         raise ValueError("open_loop_horizon must be >= 1.")
     if args.control_hz <= 0:
         raise ValueError("control_hz must be > 0.")
+    if args.inference_timeout_s <= 0:
+        raise ValueError("inference_timeout_s must be > 0.")
     if args.max_timesteps < 1:
         raise ValueError("max_timesteps must be >= 1.")
     if not 1 <= args.move_speed_percent <= 100:
@@ -460,16 +549,22 @@ def _validate_args(args: Args) -> None:
 def run(args: Args) -> None:
     _validate_args(args)
 
-    policy_client = websocket_client_policy.WebsocketClientPolicy(args.host, args.port, api_key=args.api_key)
-    server_metadata = policy_client.get_server_metadata()
-    logger.info("Server metadata: %s", server_metadata)
-    policy_action_horizon = get_policy_action_horizon(server_metadata)
-    if policy_action_horizon is not None and args.open_loop_horizon > policy_action_horizon:
-        raise ValueError(
-            f"open_loop_horizon={args.open_loop_horizon} exceeds policy action_horizon={policy_action_horizon}."
-        )
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="piper-infer")
+    # ExitStack runs callbacks in reverse order: close the websocket first so a
+    # blocked recv is released before joining the inference worker.
+    cleanup = contextlib.ExitStack()
+    cleanup.callback(lambda: executor.shutdown(wait=True, cancel_futures=True))
+    with cleanup as stack:
+        policy_client = websocket_client_policy.WebsocketClientPolicy(args.host, args.port, api_key=args.api_key)
+        stack.callback(policy_client.close)
+        server_metadata = policy_client.get_server_metadata()
+        logger.info("Server metadata: %s", server_metadata)
+        policy_action_horizon = get_policy_action_horizon(server_metadata)
+        if policy_action_horizon is not None and args.open_loop_horizon > policy_action_horizon:
+            raise ValueError(
+                f"open_loop_horizon={args.open_loop_horizon} exceeds policy action_horizon={policy_action_horizon}."
+            )
 
-    with contextlib.ExitStack() as stack:
         head_camera = RealSenseCamera(
             args.head_camera_serial,
             name="head",
@@ -535,8 +630,31 @@ def run(args: Args) -> None:
                     state,
                     args.prompt,
                 )
+                infer_started = time.monotonic()
                 with prevent_keyboard_interrupt():
-                    response = policy_client.infer(request_data)
+                    future = executor.submit(policy_client.infer, request_data)
+                    while not future.done():
+                        # OpenCV needs regular event processing. Keep previewing
+                        # fresh camera frames while the policy server is busy.
+                        preview_started = time.monotonic()
+                        preview_head = head_camera.read_rgb()
+                        preview_wrist = wrist_camera.read_rgb()
+                        if not visualizer.show(preview_head, preview_wrist):
+                            logger.info("Camera preview requested shutdown during inference.")
+                            return
+                        if time.monotonic() - infer_started > args.inference_timeout_s:
+                            policy_client.close()
+                            raise TimeoutError(
+                                f"Policy inference exceeded inference_timeout_s={args.inference_timeout_s:.1f}."
+                            )
+                        # Avoid busy polling if camera reads are faster than the
+                        # control period; wait briefly for either result or GUI.
+                        future_done = future.done()
+                        preview_ms = (time.monotonic() - preview_started) * 1000.0
+                        if not future_done and preview_ms < 5.0:
+                            time.sleep(0.005)
+                    response = future.result()
+                logger.info("Policy inference round trip: %.1f ms.", (time.monotonic() - infer_started) * 1000.0)
                 pred_action_chunk = validate_action_chunk(
                     np.asarray(response["actions"], dtype=np.float32),
                     expected_action_horizon=policy_action_horizon,
