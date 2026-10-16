@@ -58,17 +58,20 @@ def test_piper_finetune_configs():
     assert attention_bias.model.region_guidance.attention_bias_scale == 0.5
     assert attention_bias.data.base_config.region_annotation_mode == "book"
 
-    attention_bias_d9 = _config.get_config("pi05_piper_full_finetune_rtc_attention_bias_448_d9")
-    assert attention_bias_d9.training_rtc is not None
-    assert attention_bias_d9.training_rtc.max_delay == 9
     expected_delay_weights = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 4.0, 12.0, 6.0)
-    assert attention_bias_d9.training_rtc.delay_weights == expected_delay_weights
-    assert attention_bias_d9.model.image_resolution == (448, 448)
-    assert attention_bias_d9.model.simulated_delay == 10
-    assert attention_bias_d9.model.simulated_delay_weights == expected_delay_weights
-    assert attention_bias_d9.model.region_guidance is not None
-    assert attention_bias_d9.model.region_guidance.attention_bias_scale == 1
-    assert attention_bias_d9.data.base_config.region_annotation_mode == "book"
+    for scale, scale_name in ((0.5, "0_5"), (2, "2"), (5, "5")):
+        attention_bias_d9 = _config.get_config(
+            f"pi05_piper_full_finetune_rtc_attention_bias_448_d9_scale_{scale_name}"
+        )
+        assert attention_bias_d9.training_rtc is not None
+        assert attention_bias_d9.training_rtc.max_delay == 9
+        assert attention_bias_d9.training_rtc.delay_weights == expected_delay_weights
+        assert attention_bias_d9.model.image_resolution == (448, 448)
+        assert attention_bias_d9.model.simulated_delay == 10
+        assert attention_bias_d9.model.simulated_delay_weights == expected_delay_weights
+        assert attention_bias_d9.model.region_guidance is not None
+        assert attention_bias_d9.model.region_guidance.attention_bias_scale == scale
+        assert attention_bias_d9.data.base_config.region_annotation_mode == "book"
 
 
 def test_checkpoint_dir_override(tmp_path):
