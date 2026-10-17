@@ -24,6 +24,14 @@ class Pi0Config(_model.BaseModelConfig):
     action_expert_variant: _gemma.Variant = "gemma_300m"
     # Square input resolution for the JAX SigLIP encoder; each patch is 14x14.
     image_resolution: tuple[int, int] = (224, 224)
+    # Optional Qwen-style spatial reduction after SigLIP.  ``none`` preserves
+    # the original image-token sequence and all existing checkpoints.
+    image_token_merger: Literal["none", "spatial_2x2"] = "none"
+    image_token_merge_size: int = 2
+    # Static image keys embedded in the Transformer.  The default preserves
+    # the three-camera Pi0 layout; Piper's merged experiment can omit its
+    # permanently invalid left-wrist slot to avoid paying for masked tokens.
+    image_token_camera_keys: tuple[str, ...] = _model.IMAGE_KEYS
     # Disabled by default. No extra parameters or inference inputs are introduced.
     region_guidance: RegionGuidanceConfig | None = None
 
@@ -76,6 +84,21 @@ class Pi0Config(_model.BaseModelConfig):
             or self.image_resolution[0] != self.image_resolution[1]
         ):
             raise ValueError("image_resolution must be square with positive dimensions divisible by 14")
+        if self.image_token_merger not in ("none", "spatial_2x2"):
+            raise ValueError("image_token_merger must be 'none' or 'spatial_2x2'")
+        if type(self.image_token_merge_size) is not int or self.image_token_merge_size < 1:
+            raise ValueError("image_token_merge_size must be a positive integer")
+        if self.image_token_merger == "spatial_2x2" and self.image_token_merge_size != 2:
+            raise ValueError("spatial_2x2 requires image_token_merge_size=2")
+        patch_side = self.image_resolution[0] // 14
+        if patch_side % self.image_token_merge_size:
+            raise ValueError("image patch grid must be divisible by image_token_merge_size")
+        if self.image_token_merger == "none" and self.image_token_merge_size != 2:
+            raise ValueError("image_token_merge_size is only configurable when image_token_merger='spatial_2x2'")
+        if not self.image_token_camera_keys or len(set(self.image_token_camera_keys)) != len(self.image_token_camera_keys):
+            raise ValueError("image_token_camera_keys must contain distinct camera keys")
+        if any(key not in _model.IMAGE_KEYS for key in self.image_token_camera_keys):
+            raise ValueError("image_token_camera_keys contains an unknown camera key")
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
         if self.discrete_state_input is None:

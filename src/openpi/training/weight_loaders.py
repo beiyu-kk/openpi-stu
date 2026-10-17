@@ -57,7 +57,10 @@ class CheckpointWeightLoader(WeightLoader):
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
         # Add all missing LoRA weights.
         return _merge_params(
-            loaded_params, params, missing_regex=".*lora.*", resize_siglip_posemb=self.resize_siglip_posemb
+            loaded_params,
+            params,
+            missing_regex=".*(?:lora|image_token_merger).*",
+            resize_siglip_posemb=self.resize_siglip_posemb,
         )
 
 
@@ -78,7 +81,12 @@ class RTCCheckpointWeightLoader(CheckpointWeightLoader):
         extra = [k for k in flax.traverse_util.flatten_dict(loaded, sep="/") if "lora" in k and k not in reference]
         if extra:
             raise ValueError(f"RTC model would discard checkpoint adapters; preserve or merge them first: {extra[:3]}")
-        return _merge_params(loaded, params, missing_regex=".*lora.*", resize_siglip_posemb=self.resize_siglip_posemb)
+        return _merge_params(
+            loaded,
+            params,
+            missing_regex=".*(?:lora|image_token_merger).*",
+            resize_siglip_posemb=self.resize_siglip_posemb,
+        )
 
 
 @dataclasses.dataclass(frozen=True)

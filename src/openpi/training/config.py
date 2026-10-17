@@ -612,7 +612,7 @@ _CONFIGS = [
     # at 448x448 exceeds the original four-tick RTC window. The names include
     # the attention-bias scale so experiments with different guidance
     # strengths cannot be confused with one another.
-    TrainConfig( 
+    TrainConfig(
         name="pi05_piper_full_finetune_rtc_attention_bias_448_d9_scale_0_5",
         model=pi0_config.Pi0Config(
             pi05=True,
@@ -674,6 +674,36 @@ _CONFIGS = [
             action_horizon=30,
             image_resolution=(448, 448),
             region_guidance=pi0_config.RegionGuidanceConfig(attention_bias_scale=5),
+        ),
+        training_rtc=TrainingRTCConfig(
+            finetune_mode="full",
+            max_delay=9,
+            delay_weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 4.0, 12.0, 6.0),
+        ),
+        data=LeRobotPiperDataConfig(
+            base_config=DataConfig(prompt_from_task=True, region_annotation_mode="book"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=500, peak_lr=1e-5, decay_steps=10000, decay_lr=1e-6),
+        batch_size=32,
+        num_train_steps=10000,
+        save_interval=1000,
+        keep_period=5000,
+        ema_decay=None,
+    ),
+    # 448x448 SigLIP with Qwen-style 2x2 spatial token merging.
+    TrainConfig(
+        name="pi05_piper_full_finetune_rtc_attention_bias_448_d9_scale_0_5_merge2",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            image_resolution=(448, 448),
+            image_token_merger="spatial_2x2",
+            image_token_merge_size=2,
+            image_token_camera_keys=("base_0_rgb", "right_wrist_0_rgb"),
+            region_guidance=pi0_config.RegionGuidanceConfig(attention_bias_scale=0.5),
         ),
         training_rtc=TrainingRTCConfig(
             finetune_mode="full",

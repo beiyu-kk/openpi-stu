@@ -11,6 +11,7 @@ from openpi.models import model as _model
 from openpi.models import pi0_config
 from openpi.models import training_rtc as rtc
 import openpi.models.gemma as _gemma
+import openpi.models.image_token_merger as _image_token_merger
 import openpi.models.region_guidance as _region_guidance
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
@@ -74,6 +75,9 @@ class Pi0(_model.BaseModel):
         self.rtc_loss_reduction = config.rtc_loss_reduction
         self.rtc_time_distribution = config.rtc_time_distribution
         self.image_resolution = config.image_resolution
+        self.image_token_merger_mode = config.image_token_merger
+        self.image_token_merge_size = config.image_token_merge_size if config.image_token_merger == "spatial_2x2" else 1
+        self.image_token_camera_keys = config.image_token_camera_keys
         self.region_guidance = config.region_guidance
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         self.region_depth = paligemma_config.depth
@@ -99,6 +103,13 @@ class Pi0(_model.BaseModel):
         )
         img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
         self.PaliGemma = nnx.Dict(llm=llm, img=img)
+        self.image_token_merger = (
+            _image_token_merger.SpatialPatchMerger(
+                embed_dim=paligemma_config.width, merge_size=self.image_token_merge_size, rngs=rngs
+            )
+            if config.image_token_merger == "spatial_2x2"
+            else None
+        )
         self.action_in_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
         if config.pi05:
             self.time_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
@@ -120,8 +131,11 @@ class Pi0(_model.BaseModel):
         ar_mask = []
         tokens = []
         # embed images
-        for name in obs.images:
+        for name in self.image_token_camera_keys:
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
+            if self.image_token_merger is not None:
+                patch_side = self.image_resolution[0] // 14
+                image_tokens = self.image_token_merger(image_tokens, patch_side, patch_side)
 
             tokens.append(image_tokens)
             input_mask.append(
@@ -263,7 +277,12 @@ class Pi0(_model.BaseModel):
                 raise ValueError("Region-guided training requires the step-dependent schedule from train_step")
             # A folded key preserves the baseline's augmentation, noise and timestep random streams.
             image_bias = _region_guidance.image_key_bias(
-                observation, jax.random.fold_in(rng, 731), region_strength, region_keep_probability
+                observation,
+                jax.random.fold_in(rng, 731),
+                region_strength,
+                region_keep_probability,
+                merge_size=self.image_token_merge_size,
+                camera_keys=self.image_token_camera_keys,
             )
             key_bias = jnp.pad(image_bias, ((0, 0), (0, input_mask.shape[1] - image_bias.shape[1])))
             action_queries = jnp.arange(input_mask.shape[1]) >= input_mask.shape[1] - self.action_horizon

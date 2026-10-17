@@ -128,6 +128,13 @@ def test_patch_order_camera_validity_and_whole_camera_dropout():
     np.testing.assert_array_equal(rg.patch_coverage(mask), [[0, 0.5, 0, 0]])
 
 
+def test_patch_coverage_spatial_merge_averages_four_neighbours():
+    mask = jnp.zeros((1, 28, 28)).at[:, :14, :14].set(1)
+    mask = mask.at[:, :14, 14:].set(0.5)
+    mask = mask.at[:, 14:, :14].set(0.25)
+    np.testing.assert_allclose(rg.patch_coverage(mask, merge_size=2), [[0.4375]])
+
+
 @pytest.fixture
 def small_backbones(monkeypatch):
     original_siglip = siglip.Module

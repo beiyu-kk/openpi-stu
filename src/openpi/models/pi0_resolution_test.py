@@ -122,3 +122,35 @@ def test_pytorch_rejects_custom_resolution():
 
     with pytest.raises(ValueError, match="JAX"):
         PI0Pytorch(pi0_config.Pi0Config(image_resolution=(448, 448)))
+
+
+@pytest.mark.parametrize(("size", "tokens_per_image"), [(224, 64), (448, 256)])
+def test_spatial_token_merger_reduces_prefix_tokens(small_backbones, size, tokens_per_image):
+    config = pi0_config.Pi0Config(
+        pi05=True,
+        image_resolution=(size, size),
+        image_token_merger="spatial_2x2",
+        action_horizon=2,
+        max_token_len=4,
+        dtype="float32",
+    )
+    model = config.create(jax.random.key(0))
+    encoded, masks, _ = nnx_utils.module_jit(model.embed_prefix)(config.fake_obs())
+    assert encoded.shape == (1, 3 * tokens_per_image + 4, 32)
+    assert masks.shape == encoded.shape[:2]
+
+
+def test_spatial_piper_camera_selection_uses_two_image_slots(small_backbones):
+    config = pi0_config.Pi0Config(
+        pi05=True,
+        image_resolution=(448, 448),
+        image_token_merger="spatial_2x2",
+        image_token_camera_keys=("base_0_rgb", "right_wrist_0_rgb"),
+        action_horizon=2,
+        max_token_len=4,
+        dtype="float32",
+    )
+    model = config.create(jax.random.key(0))
+    encoded, masks, _ = nnx_utils.module_jit(model.embed_prefix)(config.fake_obs())
+    assert encoded.shape == (1, 2 * 256 + 4, 32)
+    assert masks.shape == encoded.shape[:2]

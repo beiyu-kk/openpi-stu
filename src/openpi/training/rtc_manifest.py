@@ -44,6 +44,8 @@ def source_digest():
 def model_values(values):
     values = dict(values)
     values["image_resolution"] = tuple(values["image_resolution"])
+    if values.get("image_token_camera_keys") is not None:
+        values["image_token_camera_keys"] = tuple(values["image_token_camera_keys"])
     if values.get("simulated_delay_weights") is not None:
         values["simulated_delay_weights"] = tuple(values["simulated_delay_weights"])
     if values.get("region_guidance") is not None:

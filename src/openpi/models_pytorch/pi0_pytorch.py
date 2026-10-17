@@ -88,6 +88,8 @@ class PI0Pytorch(nn.Module):
             raise ValueError("Training RTC supports JAX only")
         if config.image_resolution != (224, 224):
             raise ValueError("Custom image_resolution is currently supported only by the JAX pi0/pi0.5 model")
+        if getattr(config, "image_token_merger", "none") != "none":
+            raise ValueError("image_token_merger is currently supported only by the JAX pi0/pi0.5 model")
         self.config = config
         self.pi05 = config.pi05
 

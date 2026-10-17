@@ -59,6 +59,16 @@ def test_resize_requires_opt_in(monkeypatch):
         at.check_pytree_equality(expected=target, got=loaded, check_shapes=True)
 
 
+def test_missing_image_token_merger_params_keep_target_initialization(monkeypatch):
+    source = _params(np.ones((1, 256, 4), dtype=np.float32))
+    target = {
+        **source,
+        "image_token_merger": {"proj_in": {"kernel": np.full((16, 4), 3, dtype=np.float32)}},
+    }
+    loaded = _load(monkeypatch, source, target, resize=False)
+    np.testing.assert_array_equal(loaded["image_token_merger"]["proj_in"]["kernel"], 3)
+
+
 def test_other_shape_mismatches_are_not_adapted(monkeypatch):
     source = _params(np.ones((1, 256, 4), dtype=np.float32))
     target = _params(jax.ShapeDtypeStruct((1, 1024, 4), jnp.float32), projection_width=8)

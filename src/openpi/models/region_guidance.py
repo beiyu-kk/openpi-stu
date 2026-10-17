@@ -21,7 +21,7 @@ class RegionGuidanceConfig:
 
     def __post_init__(self):
         if not math.isfinite(self.attention_bias_scale) or self.attention_bias_scale < 0:
-            raise ValueError("Region attention_bias_scale must be finite and nonnegative")
+            raise ValueError("Region guidance attention_bias_scale must be finite and nonnegative")
         if not 0 <= self.keep_probability <= 1:
             raise ValueError("Region guidance keep_probability must be in [0, 1]")
         if not 0 <= self.decay_start < self.decay_end < 1:
@@ -59,29 +59,42 @@ class RegionGuidanceConfig:
         return self.attention_bias_scale
 
 
-def patch_coverage(masks, patch_size: int = 14):
+def patch_coverage(masks, patch_size: int = 14, merge_size: int = 1):
     """Average pixel coverage, preserving the encoder's row-major patch order."""
     batch, height, width = masks.shape
     if height % patch_size or width % patch_size:
         raise ValueError("Region masks must have dimensions divisible by the image patch size")
-    return (
+    coverage = (
         masks.reshape(batch, height // patch_size, patch_size, width // patch_size, patch_size)
         .mean(axis=(2, 4))
-        .reshape(batch, -1)
     )
+    patch_height, patch_width = coverage.shape[1:]
+    if type(merge_size) is not int or merge_size < 1:
+        raise ValueError("merge_size must be a positive integer")
+    if patch_height % merge_size or patch_width % merge_size:
+        raise ValueError("Patch grid must be divisible by merge_size")
+    if merge_size > 1:
+        coverage = coverage.reshape(
+            batch, patch_height // merge_size, merge_size, patch_width // merge_size, merge_size
+        ).mean(axis=(2, 4))
+    return coverage.reshape(batch, -1)
 
 
-def image_key_bias(observation, rng, strength, keep_probability):
+def image_key_bias(observation, rng, strength, keep_probability, *, merge_size: int = 1, camera_keys=None):
     """Sample one gate per example and camera, not per patch or attention head."""
     if observation.region_masks is None or observation.region_valid is None:
         raise ValueError("Region-guided training requires region_masks and region_valid from the annotation loader")
-    keys = tuple(observation.images)
-    if set(observation.region_masks) != set(keys) or set(observation.region_valid) != set(keys):
-        raise ValueError("Region annotations must match all model camera keys")
+    keys = tuple(observation.images) if camera_keys is None else tuple(camera_keys)
+    if not keys:
+        raise ValueError("At least one camera key is required for region attention bias")
+    if any(key not in observation.images for key in keys):
+        raise ValueError("Region attention camera keys must exist in observation.images")
+    if not set(keys).issubset(observation.region_masks) or not set(keys).issubset(observation.region_valid):
+        raise ValueError("Region annotations must include all selected model camera keys")
     gates = jax.random.bernoulli(rng, keep_probability, (observation.state.shape[0], len(keys)))
     biases = []
     for camera_index, key in enumerate(keys):
-        coverage = patch_coverage(jnp.clip(observation.region_masks[key], 0.0, 1.0))
+        coverage = patch_coverage(jnp.clip(observation.region_masks[key], 0.0, 1.0), merge_size=merge_size)
         valid = observation.region_valid[key] & observation.image_masks[key]
         enabled = gates[:, camera_index] & valid
         biases.append(coverage * (strength * enabled[:, None]))
