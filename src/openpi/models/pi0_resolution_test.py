@@ -93,6 +93,61 @@ def test_loss_gradients_and_inference_keep_resolution(small_backbones, monkeypat
     assert False in calls
 
 
+def test_knowledge_insulation_trains_both_representations_and_stops_flow_gradient(small_backbones):
+    config = pi0_config.Pi0Config(
+        pi05=True,
+        knowledge_insulation=True,
+        image_resolution=(224, 224),
+        action_horizon=2,
+        max_token_len=8,
+        dtype="float32",
+    )
+    model = config.create(jax.random.key(10))
+    observation = dataclasses.replace(
+        config.fake_obs(),
+        tokenized_prompt=jnp.arange(2, 10, dtype=jnp.int32)[None, :],
+        tokenized_prompt_mask=jnp.ones((1, 8), dtype=jnp.bool_),
+        token_ar_mask=jnp.array([[0, 0, 0, 0, 1, 1, 1, 1]], dtype=jnp.int32),
+        token_loss_mask=jnp.array([[0, 0, 0, 0, 1, 1, 1, 1]], dtype=jnp.bool_),
+    )
+    actions = config.fake_act()
+
+    flow_loss, flow_grads = nnx.value_and_grad(
+        lambda current: jnp.mean(current.flow_errors(jax.random.key(11), observation, actions)[0])
+    )(model)
+    discrete_loss, discrete_grads = nnx.value_and_grad(
+        lambda current: jnp.mean(current.discrete_action_loss(jax.random.key(12), observation))
+    )(model)
+    joint_loss, joint_grads = nnx.value_and_grad(
+        lambda current: jnp.mean(current.compute_loss(jax.random.key(13), observation, actions))
+    )(model)
+
+    assert np.isfinite(np.asarray(flow_loss))
+    assert np.isfinite(np.asarray(discrete_loss))
+    assert np.isfinite(np.asarray(joint_loss))
+
+    def norm_matching(grads, predicate):
+        leaves = []
+        for path, value in jax.tree_util.tree_flatten_with_path(grads.to_pure_dict())[0]:
+            path_keys = tuple(getattr(part, "key", part) for part in path)
+            if predicate(path_keys):
+                leaves.append(jnp.linalg.norm(value))
+        return sum((float(value) for value in leaves), 0.0)
+
+    # Flow matching must update the action expert while leaving all VLM-only
+    # parameters untouched. FAST CE supplies the missing VLM gradient.
+    assert norm_matching(flow_grads, lambda path: path[:2] == ("PaliGemma", "img")) == 0.0
+    assert (
+        norm_matching(
+            flow_grads, lambda path: path[:2] == ("PaliGemma", "llm") and any(str(key).endswith("_1") for key in path)
+        )
+        > 0.0
+    )
+    assert norm_matching(discrete_grads, lambda path: path[:2] == ("PaliGemma", "img")) > 0.0
+    assert norm_matching(discrete_grads, lambda path: path[:2] == ("PaliGemma", "llm")) > 0.0
+    assert norm_matching(joint_grads, lambda path: path[:2] == ("PaliGemma", "img")) > 0.0
+
+
 @pytest.mark.parametrize("size", [224, 336, 448])
 def test_224_weights_to_configured_model_checkpoint(small_backbones, tmp_path, size):
     config = pi0_config.Pi0Config(pi05=True, action_horizon=2, max_token_len=4, dtype="float32")

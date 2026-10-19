@@ -1,4 +1,5 @@
 import dataclasses
+import json
 
 import flax.nnx as nnx
 import jax
@@ -41,6 +42,36 @@ def test_resume_preserves_guidance_schedule_and_method(tmp_path):
         train._record_region_guidance(resized, resuming=True)  # noqa: SLF001
     with pytest.raises(ValueError, match="same guidance options"):
         train._record_region_guidance(dataclasses.replace(config, model=base.model), resuming=True)  # noqa: SLF001
+
+
+def test_old_action_only_guidance_metadata_remains_resumable(tmp_path):
+    base = _config.get_config("pi05_piper_lora_finetune")
+    config = dataclasses.replace(
+        base,
+        checkpoint_dir_override=str(tmp_path),
+        exp_name="legacy_region_test",
+        model=dataclasses.replace(base.model, region_guidance=RegionGuidanceConfig()),
+        data=dataclasses.replace(
+            base.data,
+            dataset_root="/dataset",
+            base_config=dataclasses.replace(base.data.base_config, region_annotations_embedded=True),
+        ),
+    )
+    train._record_region_guidance(config, resuming=False)  # noqa: SLF001
+    path = tmp_path / "region_guidance.json"
+    saved = json.loads(path.read_text())
+    saved["guidance"].pop("query_types")
+    path.write_text(json.dumps(saved))
+    train._record_region_guidance(config, resuming=True)  # noqa: SLF001
+
+    all_scopes = dataclasses.replace(
+        config,
+        model=dataclasses.replace(
+            config.model, region_guidance=RegionGuidanceConfig(query_types=("action", "image", "prompt"))
+        ),
+    )
+    with pytest.raises(ValueError, match="resume settings differ"):
+        train._record_region_guidance(all_scopes, resuming=True)  # noqa: SLF001
 
 
 def test_baseline_does_not_create_guidance_metadata(tmp_path):

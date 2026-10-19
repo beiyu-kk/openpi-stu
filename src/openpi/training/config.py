@@ -121,26 +121,34 @@ class ModelTransformFactory(GroupFactory):
         match model_config.model_type:
             case _model.ModelType.PI0:
                 assert isinstance(model_config, pi0_config.Pi0Config)
+                tokenizer = (
+                    _transforms.TokenizeFASTInputs(_tokenizer.FASTTokenizer(model_config.max_token_len))
+                    if model_config.knowledge_insulation
+                    else _transforms.TokenizePrompt(_tokenizer.PaligemmaTokenizer(model_config.max_token_len))
+                )
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
                         _transforms.ResizeImages(*model_config.image_resolution),
-                        _transforms.TokenizePrompt(
-                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
-                        ),
+                        tokenizer,
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
             case _model.ModelType.PI05:
                 assert isinstance(model_config, pi0_config.Pi0Config)
+                tokenizer = (
+                    _transforms.TokenizeFASTInputs(_tokenizer.FASTTokenizer(model_config.max_token_len))
+                    if model_config.knowledge_insulation
+                    else _transforms.TokenizePrompt(
+                        _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                        discrete_state_input=model_config.discrete_state_input,
+                    )
+                )
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
                         _transforms.ResizeImages(*model_config.image_resolution),
-                        _transforms.TokenizePrompt(
-                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
-                            discrete_state_input=model_config.discrete_state_input,
-                        ),
+                        tokenizer,
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
@@ -482,13 +490,19 @@ def resolve_training_config(config: TrainConfig) -> TrainConfig:
         config.data,
         base_config=dataclasses.replace(config.data.base_config or DataConfig(), training_rtc=rtc),
     )
+    # Knowledge Insulation relies on the FAST cross-entropy branch to update
+    # the VLM while flow matching updates the action expert.  RTC's historical
+    # LoRA filter trains only the action side, which would silently remove the
+    # discrete representation-learning signal, so keep both expert LoRA sets
+    # trainable when the recipe is enabled.
+    freeze_filter = model.get_freeze_filter() if model.knowledge_insulation else model.get_rtc_freeze_filter()
     config = dataclasses.replace(
         config,
         model=model,
         data=data,
         optimizer=optimizer,
         weight_loader=loader,
-        freeze_filter=model.get_rtc_freeze_filter(),
+        freeze_filter=freeze_filter,
         ema_decay=None,
     )
     if data.dataset_root is not None and data.norm_stats_dir is None and rtc.norm_source == "train_split":
@@ -592,7 +606,9 @@ _CONFIGS = [
             pi05=True,
             action_horizon=30,
             image_resolution=(224, 224),
-            region_guidance=pi0_config.RegionGuidanceConfig(attention_bias_scale=0.5),
+            region_guidance=pi0_config.RegionGuidanceConfig(
+                attention_bias_scale=0.5, query_types=("action", "image", "prompt")
+            ),
         ),
         training_rtc=TrainingRTCConfig(finetune_mode="full", max_delay=4),
         data=LeRobotPiperDataConfig(
@@ -618,7 +634,9 @@ _CONFIGS = [
             pi05=True,
             action_horizon=30,
             image_resolution=(448, 448),
-            region_guidance=pi0_config.RegionGuidanceConfig(attention_bias_scale=0.5),
+            region_guidance=pi0_config.RegionGuidanceConfig(
+                attention_bias_scale=0.5, query_types=("action", "image", "prompt")
+            ),
         ),
         training_rtc=TrainingRTCConfig(
             finetune_mode="full",
@@ -647,7 +665,9 @@ _CONFIGS = [
             pi05=True,
             action_horizon=30,
             image_resolution=(448, 448),
-            region_guidance=pi0_config.RegionGuidanceConfig(attention_bias_scale=2),
+            region_guidance=pi0_config.RegionGuidanceConfig(
+                attention_bias_scale=2, query_types=("action", "image", "prompt")
+            ),
         ),
         training_rtc=TrainingRTCConfig(
             finetune_mode="full",
@@ -673,7 +693,9 @@ _CONFIGS = [
             pi05=True,
             action_horizon=30,
             image_resolution=(448, 448),
-            region_guidance=pi0_config.RegionGuidanceConfig(attention_bias_scale=5),
+            region_guidance=pi0_config.RegionGuidanceConfig(
+                attention_bias_scale=5, query_types=("action", "image", "prompt")
+            ),
         ),
         training_rtc=TrainingRTCConfig(
             finetune_mode="full",
@@ -703,7 +725,9 @@ _CONFIGS = [
             image_token_merger="spatial_2x2",
             image_token_merge_size=2,
             image_token_camera_keys=("base_0_rgb", "right_wrist_0_rgb"),
-            region_guidance=pi0_config.RegionGuidanceConfig(attention_bias_scale=0.5),
+            region_guidance=pi0_config.RegionGuidanceConfig(
+                attention_bias_scale=0.5, query_types=("action", "image", "prompt")
+            ),
         ),
         training_rtc=TrainingRTCConfig(
             finetune_mode="full",

@@ -161,7 +161,21 @@ def train_step(
             loss = jnp.mean(loss_grid(errors, active, config.training_rtc.loss_reduction))
             raw_dim = min(7, errors.shape[-1])
             raw_error = jnp.sum(jnp.where(active[..., None], errors[..., :raw_dim], 0.0))
-            return loss, {"rtc/active_tokens": count, "rtc/raw_mse": raw_error / jnp.maximum(count * raw_dim, 1)}
+            info = {"rtc/active_tokens": count, "rtc/raw_mse": raw_error / jnp.maximum(count * raw_dim, 1)}
+            if getattr(model, "knowledge_insulation", False):
+                discrete_loss = model.discrete_action_loss(
+                    jax.random.fold_in(rng, 733),
+                    observation,
+                    train=True,
+                    **region_kwargs,
+                )
+                discrete_loss = jnp.mean(discrete_loss)
+                loss = loss + model.discrete_action_loss_weight * discrete_loss
+                info["discrete_action_loss"] = discrete_loss
+                info["discrete_action_tokens"] = jnp.sum(
+                    observation.token_loss_mask[:, 1:] & observation.tokenized_prompt_mask[:, 1:]
+                )
+            return loss, info
         chunked_loss = model.compute_loss(rng, observation, actions, train=True, **region_kwargs)
         return jnp.mean(chunked_loss)
 
@@ -181,8 +195,11 @@ def train_step(
     params = state.params.filter(config.trainable_filter)
     if config.training_rtc is not None:
         # No target tokens means no Adam momentum/weight-decay update either.
+        update_enabled = rtc_info["rtc/active_tokens"] > 0
+        if getattr(model, "knowledge_insulation", False):
+            update_enabled = update_enabled | (rtc_info["discrete_action_tokens"] > 0)
         updates, new_opt_state = jax.lax.cond(
-            rtc_info["rtc/active_tokens"] > 0,
+            update_enabled,
             lambda: state.tx.update(grads, state.opt_state, params),
             lambda: (jax.tree.map(jnp.zeros_like, params), state.opt_state),
         )
@@ -243,10 +260,23 @@ def _record_region_guidance(config: _config.TrainConfig, *, resuming: bool):
         "dataset_root": config.data.dataset_root,
         "annotations": "embedded",
         "annotation_mode": config.data.base_config.region_annotation_mode,
+        "knowledge_insulation": getattr(config.model, "knowledge_insulation", False),
+        "discrete_action_loss_weight": getattr(config.model, "discrete_action_loss_weight", 1.0),
     }
     settings = json.loads(json.dumps(settings))
     if resuming:
-        if not path.exists() or json.loads(path.read_text()) != settings:
+        if not path.exists():
+            raise ValueError("Region guidance resume settings differ; keep the original schedule and dataset")
+        saved = json.loads(path.read_text())
+        saved.setdefault("knowledge_insulation", False)
+        saved.setdefault("discrete_action_loss_weight", 1.0)
+        # ``query_types`` was added after the first action-only experiments.
+        # Missing metadata therefore means the dataclass default, action-only.
+        saved_guidance = saved.setdefault("guidance", {})
+        if "attention_bias_scale" not in saved_guidance and "strength" in saved_guidance:
+            saved_guidance["attention_bias_scale"] = saved_guidance.pop("strength")
+        saved_guidance.setdefault("query_types", ["action"])
+        if saved != settings:
             raise ValueError("Region guidance resume settings differ; keep the original schedule and dataset")
     else:
         path.write_text(json.dumps(settings, indent=2) + "\n")

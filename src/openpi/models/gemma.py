@@ -162,7 +162,16 @@ class Attention(nn.Module):
     configs: Sequence[Config]
 
     @nn.compact
-    def __call__(self, xs, positions, attn_mask, kv_cache, region_bias=None, region_layer_enabled=0.0):
+    def __call__(
+        self,
+        xs,
+        positions,
+        attn_mask,
+        kv_cache,
+        region_bias=None,
+        region_layer_enabled=0.0,
+        knowledge_insulation=False,  # noqa: FBT002
+    ):
         # all experts must share the same head dim, num heads, and num kv heads for self-attention to work
         assert all(config.head_dim == self.configs[0].head_dim for config in self.configs)
         assert all(config.num_heads == self.configs[0].num_heads for config in self.configs)
@@ -209,13 +218,47 @@ class Attention(nn.Module):
         # should still be half-precision here (if input was half-precision)
         assert q.dtype == k.dtype == v.dtype == dtype
 
+        backbone_query_len = 0 if xs[0] is None else xs[0].shape[1]
+
         if kv_cache is not None:
             cache_k, cache_v = kv_cache
             k = jnp.concatenate([cache_k, k], axis=1)
             v = jnp.concatenate([cache_v, v], axis=1)
+            backbone_key_len = cache_k.shape[1] + backbone_query_len
+        else:
+            backbone_key_len = backbone_query_len
 
         q = einops.rearrange(q, "B T (K G) H -> B T K G H", K=self.configs[0].num_kv_heads)
-        logits = jnp.einsum("BTKGH,BSKH->BKGTS", q, k, preferred_element_type=jnp.float32)
+
+        def attention_logits(*, insulate):
+            # Preserve the forward values while stopping only the action-expert
+            # rows from sending gradients through backbone K/V. Backbone query
+            # rows still use the ordinary tensors and train normally.
+            if not insulate:
+                return jnp.einsum("BTKGH,BSKH->BKGTS", q, k, preferred_element_type=jnp.float32)
+            action_k = jnp.concatenate(
+                [jax.lax.stop_gradient(k[:, :backbone_key_len]), k[:, backbone_key_len:]], axis=1
+            )
+            return jnp.concatenate(
+                [
+                    jnp.einsum("BTKGH,BSKH->BKGTS", q[:, :backbone_query_len], k, preferred_element_type=jnp.float32),
+                    jnp.einsum(
+                        "BTKGH,BSKH->BKGTS", q[:, backbone_query_len:], action_k, preferred_element_type=jnp.float32
+                    ),
+                ],
+                axis=-2,
+            )
+
+        has_action_queries = len(xs) > 1 and xs[1] is not None
+        if has_action_queries:
+            logits = jax.lax.cond(
+                knowledge_insulation,
+                lambda _: attention_logits(insulate=True),
+                lambda _: attention_logits(insulate=False),
+                operand=None,
+            )
+        else:
+            logits = attention_logits(insulate=False)
         if region_bias is not None:
             logits = region_guidance.add_attention_bias(logits, *region_bias, region_layer_enabled)
 
@@ -230,7 +273,29 @@ class Attention(nn.Module):
 
         probs = jax.nn.softmax(masked_logits, axis=-1).astype(dtype)
 
-        encoded = jnp.einsum("BKGTS,BSKH->BTKGH", probs, v)
+        def attention_values(*, insulate):
+            if not insulate:
+                return jnp.einsum("BKGTS,BSKH->BTKGH", probs, v)
+            action_v = jnp.concatenate(
+                [jax.lax.stop_gradient(v[:, :backbone_key_len]), v[:, backbone_key_len:]], axis=1
+            )
+            return jnp.concatenate(
+                [
+                    jnp.einsum("BKGTS,BSKH->BTKGH", probs[..., :backbone_query_len, :], v),
+                    jnp.einsum("BKGTS,BSKH->BTKGH", probs[..., backbone_query_len:, :], action_v),
+                ],
+                axis=1,
+            )
+
+        if has_action_queries:
+            encoded = jax.lax.cond(
+                knowledge_insulation,
+                lambda _: attention_values(insulate=True),
+                lambda _: attention_values(insulate=False),
+                operand=None,
+            )
+        else:
+            encoded = attention_values(insulate=False)
         encoded = einops.rearrange(encoded, "B T K G H -> B T (K G) H")
 
         out = []
@@ -303,6 +368,7 @@ class Block(nn.Module):
         deterministic=True,  # noqa: FBT002
         region_bias=None,
         region_layer_enabled=0.0,
+        knowledge_insulation=False,  # noqa: FBT002
     ):
         xs = sharding.activation_sharding_constraint(xs)
         drop = nn.Dropout(self.dropout, self.dropout_bdims) if self.dropout else lambda x, _: x
@@ -318,7 +384,15 @@ class Block(nn.Module):
             gates.append(gate if x is not None else None)
 
         pre_attn = sharding.activation_sharding_constraint(pre_attn)
-        post_attn, kv_cache = attn(pre_attn, positions, attn_mask, kv_cache, region_bias, region_layer_enabled)
+        post_attn, kv_cache = attn(
+            pre_attn,
+            positions,
+            attn_mask,
+            kv_cache,
+            region_bias,
+            region_layer_enabled,
+            knowledge_insulation,
+        )
         post_attn = jax.tree.map(lambda x: drop(x, deterministic), post_attn)
         post_attn = sharding.activation_sharding_constraint(post_attn)
         xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, post_attn, gates, strict=True)]
@@ -387,6 +461,7 @@ class Module(nn.Module):
                 nn.broadcast,
                 nn.broadcast,
                 0,
+                nn.broadcast,
             ),  # cache, positions, mask, adarms, deterministic, region_bias, per-layer switch
             length=self.configs[0].depth,
         )(
@@ -401,6 +476,10 @@ class Module(nn.Module):
         return self.embedder.encode(tokens).astype(self.embed_dtype)
 
     @at.typecheck
+    def decode(self, x: at.Float[at.Array, "b t d"]) -> at.Float[at.Array, "b t v"]:
+        return self.embedder.decode(x)
+
+    @at.typecheck
     def __call__(
         self,
         # list of token arrays, one for each expert, or None if that expert should not be run
@@ -413,6 +492,7 @@ class Module(nn.Module):
         deterministic: bool = True,
         region_bias: tuple[at.Float[at.Array, "b s"], at.Bool[at.Array, " t"], at.Bool[at.Array, " n"]] | None = None,
         region_layer_mask: at.Bool[at.Array, " l"] | None = None,
+        knowledge_insulation: bool = False,
     ) -> tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCache]:
         embedded = jax.tree.map(lambda e: e.astype(self.embed_dtype), embedded)
         mask = jnp.asarray(mask)[:, None, :, :]
@@ -422,7 +502,15 @@ class Module(nn.Module):
         if region_layer_mask is None:
             region_layer_mask = jnp.zeros((self.configs[0].depth,), dtype=jnp.bool_)
         embedded, kv_cache = self.layers(
-            embedded, kv_cache, positions, mask, adarms_cond, deterministic, region_bias, region_layer_mask
+            embedded,
+            kv_cache,
+            positions,
+            mask,
+            adarms_cond,
+            deterministic,
+            region_bias,
+            region_layer_mask,
+            knowledge_insulation,
         )
 
         assert all(e.dtype == jnp.dtype(self.embed_dtype) for e in embedded if e is not None)

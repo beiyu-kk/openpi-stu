@@ -84,6 +84,8 @@ def make_att_2d_masks(pad_masks, att_masks):
 class PI0Pytorch(nn.Module):
     def __init__(self, config):
         super().__init__()
+        if getattr(config, "knowledge_insulation", False):
+            raise ValueError("Knowledge Insulation is implemented by the JAX Pi0/Pi0.5 path; use train.py")
         if getattr(config, "simulated_delay", None) is not None:
             raise ValueError("Training RTC supports JAX only")
         if config.image_resolution != (224, 224):

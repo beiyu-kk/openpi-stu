@@ -78,7 +78,12 @@ class Pi0(_model.BaseModel):
         self.image_token_merger_mode = config.image_token_merger
         self.image_token_merge_size = config.image_token_merge_size if config.image_token_merger == "spatial_2x2" else 1
         self.image_token_camera_keys = config.image_token_camera_keys
+        patch_side = self.image_resolution[0] // 14
+        self.image_tokens_per_camera = (patch_side // self.image_token_merge_size) ** 2
+        self.image_token_count = len(self.image_token_camera_keys) * self.image_tokens_per_camera
         self.region_guidance = config.region_guidance
+        self.knowledge_insulation = config.knowledge_insulation
+        self.discrete_action_loss_weight = config.discrete_action_loss_weight
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         self.region_depth = paligemma_config.depth
         self.region_num_heads = paligemma_config.num_heads
@@ -125,11 +130,12 @@ class Pi0(_model.BaseModel):
 
     @at.typecheck
     def embed_prefix(
-        self, obs: _model.Observation
-    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"]]:
+        self, obs: _model.Observation, *, discrete_action_tokens: bool = False
+    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, "b s"]]:
         input_mask = []
         ar_mask = []
         tokens = []
+        batch_size = obs.state.shape[0]
         # embed images
         for name in self.image_token_camera_keys:
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
@@ -146,18 +152,29 @@ class Pi0(_model.BaseModel):
                 )
             )
             # image tokens attend to each other
-            ar_mask += [False] * image_tokens.shape[1]
+            ar_mask.append(jnp.zeros((batch_size, image_tokens.shape[1]), dtype=jnp.bool_))
 
         # add language (aka tokenized inputs)
         if obs.tokenized_prompt is not None:
             tokenized_inputs = self.PaliGemma.llm(obs.tokenized_prompt, method="embed")
             tokens.append(tokenized_inputs)
-            input_mask.append(obs.tokenized_prompt_mask)
-            # full attention between image and language inputs
-            ar_mask += [False] * tokenized_inputs.shape[1]
+            token_mask = obs.tokenized_prompt_mask
+            if token_mask is None:
+                raise ValueError("tokenized_prompt_mask is required with tokenized_prompt")
+            token_ar_mask = (
+                jnp.zeros_like(token_mask, dtype=jnp.bool_)
+                if obs.token_ar_mask is None
+                else obs.token_ar_mask.astype(jnp.bool_)
+            )
+            if not discrete_action_tokens and obs.token_loss_mask is not None:
+                # The continuous action expert must not see FAST action tokens.
+                token_mask = token_mask & ~obs.token_loss_mask
+            token_ar_mask = jnp.where(token_mask, token_ar_mask, jnp.zeros_like(token_ar_mask))
+            input_mask.append(token_mask)
+            ar_mask.append(token_ar_mask)
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
-        ar_mask = jnp.array(ar_mask)
+        ar_mask = jnp.concatenate(ar_mask, axis=1)
         return tokens, input_mask, ar_mask
 
     @at.typecheck
@@ -261,14 +278,15 @@ class Pi0(_model.BaseModel):
         if self.simulated_delay is not None and observation.action_is_pad is not None:
             active = active & ~observation.action_is_pad
         u_t = noise - actions
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation, discrete_action_tokens=False)
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, model_time)
         if self.simulated_delay is not None and observation.action_is_pad is not None:
             # Padding must not be visible as clean prefix context or noisy keys.
             # Loss masking alone still leaks repeated end-of-episode targets into valid tokens.
             suffix_mask = suffix_mask & ~observation.action_is_pad
         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
-        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+        suffix_ar_mask = jnp.broadcast_to(suffix_ar_mask, (input_mask.shape[0], suffix_ar_mask.shape[0]))
+        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=1)
         attn_mask = make_attn_mask(input_mask, ar_mask)
         positions = jnp.cumsum(input_mask, axis=1) - 1
         region_kwargs = {}
@@ -285,7 +303,19 @@ class Pi0(_model.BaseModel):
                 camera_keys=self.image_token_camera_keys,
             )
             key_bias = jnp.pad(image_bias, ((0, 0), (0, input_mask.shape[1] - image_bias.shape[1])))
-            action_queries = jnp.arange(input_mask.shape[1]) >= input_mask.shape[1] - self.action_horizon
+            prefix_length = prefix_tokens.shape[1]
+            if prefix_length < self.image_token_count:
+                raise ValueError(
+                    f"Prefix length {prefix_length} is shorter than the configured image token count "
+                    f"{self.image_token_count}"
+                )
+            region_queries = _region_guidance.query_mask(
+                input_mask.shape[1],
+                image_range=(0, self.image_token_count),
+                prompt_range=(self.image_token_count, prefix_length),
+                action_range=(input_mask.shape[1] - self.action_horizon, input_mask.shape[1]),
+                query_types=self.region_guidance.query_types,
+            )
             head_mask = (
                 jnp.zeros(self.region_num_heads, dtype=jnp.bool_)
                 .at[jnp.array(self.region_guidance.head_indices(self.region_num_heads))]
@@ -296,16 +326,95 @@ class Pi0(_model.BaseModel):
                 .at[jnp.array(self.region_guidance.layer_indices(self.region_depth))]
                 .set(True)
             )
-            region_kwargs = {"region_bias": (key_bias, action_queries, head_mask), "region_layer_mask": layer_mask}
+            region_kwargs = {"region_bias": (key_bias, region_queries, head_mask), "region_layer_mask": layer_mask}
         (prefix_out, suffix_out), _ = self.PaliGemma.llm(
             [prefix_tokens, suffix_tokens],
             mask=attn_mask,
             positions=positions,
             adarms_cond=[None, adarms_cond],
+            knowledge_insulation=self.knowledge_insulation,
             **region_kwargs,
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
         return jnp.square(v_t - u_t), active
+
+    def discrete_action_loss(
+        self,
+        rng,
+        observation,
+        *,
+        train=False,
+        region_strength=None,
+        region_keep_probability=None,
+    ):
+        """Train the VLM backbone on FAST action tokens.
+
+        This is the representation-learning branch used by Knowledge
+        Insulation. It runs the backbone alone, so its autoregressive action
+        tokens never attend to the continuous action expert.
+        """
+        if observation.tokenized_prompt is None or observation.tokenized_prompt_mask is None:
+            raise ValueError("Knowledge Insulation requires FAST tokenized prompts")
+        if observation.token_ar_mask is None or observation.token_loss_mask is None:
+            raise ValueError("Knowledge Insulation requires FAST token and loss masks")
+        observation = _model.preprocess_observation(
+            rng, observation, train=train, image_resolution=self.image_resolution
+        )
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation, discrete_action_tokens=True)
+        attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        region_kwargs = {}
+        if train and self.region_guidance is not None:
+            if region_strength is None or region_keep_probability is None:
+                raise ValueError("Region-guided training requires the step-dependent schedule from train_step")
+            image_bias = _region_guidance.image_key_bias(
+                observation,
+                jax.random.fold_in(rng, 731),
+                region_strength,
+                region_keep_probability,
+                merge_size=self.image_token_merge_size,
+                camera_keys=self.image_token_camera_keys,
+            )
+            prefix_length = prefix_tokens.shape[1]
+            key_bias = jnp.pad(image_bias, ((0, 0), (0, prefix_length - image_bias.shape[1])))
+            region_queries = _region_guidance.query_mask(
+                prefix_length,
+                image_range=(0, self.image_token_count),
+                prompt_range=(self.image_token_count, prefix_length),
+                query_types=self.region_guidance.query_types,
+            )
+            head_mask = (
+                jnp.zeros(self.region_num_heads, dtype=jnp.bool_)
+                .at[jnp.array(self.region_guidance.head_indices(self.region_num_heads))]
+                .set(True)
+            )
+            layer_mask = (
+                jnp.zeros(self.region_depth, dtype=jnp.bool_)
+                .at[jnp.array(self.region_guidance.layer_indices(self.region_depth))]
+                .set(True)
+            )
+            region_kwargs = {
+                "region_bias": (key_bias, region_queries, head_mask),
+                "region_layer_mask": layer_mask,
+            }
+        (prefix_out, _), _ = self.PaliGemma.llm(
+            [prefix_tokens, None],
+            mask=attn_mask,
+            positions=positions,
+            knowledge_insulation=self.knowledge_insulation,
+            **region_kwargs,
+        )
+
+        # The first image_token_count outputs correspond to image patches. The
+        # remaining outputs align with the tokenized prompt and predict its next
+        # token autoregressively.
+        token_hidden = prefix_out[:, self.image_token_count :]
+        logits = self.PaliGemma.llm(token_hidden[:, :-1], method="decode")
+        logp = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
+        targets = observation.tokenized_prompt[:, 1:]
+        loss_mask = observation.token_loss_mask[:, 1:] & observation.tokenized_prompt_mask[:, 1:]
+        nll = -jnp.take_along_axis(logp, targets[..., None], axis=-1)[..., 0]
+        return jnp.sum(nll * loss_mask, axis=-1) / jnp.maximum(jnp.sum(loss_mask, axis=-1), 1)
 
     @override
     def compute_loss(
@@ -333,8 +442,19 @@ class Pi0(_model.BaseModel):
             region_keep_probability=region_keep_probability,
         )
         if self.simulated_delay is None:
-            return jnp.mean(errors, axis=-1)
-        return rtc.loss_grid(errors, active, self.rtc_loss_reduction)
+            flow_loss = jnp.mean(errors, axis=-1)
+        else:
+            flow_loss = rtc.loss_grid(errors, active, self.rtc_loss_reduction)
+        if self.knowledge_insulation:
+            discrete_loss = self.discrete_action_loss(
+                jax.random.fold_in(rng, 733),
+                observation,
+                train=train,
+                region_strength=region_strength,
+                region_keep_probability=region_keep_probability,
+            )
+            flow_loss = flow_loss + self.discrete_action_loss_weight * discrete_loss[..., None]
+        return flow_loss
 
     def rtc_validation_sums(self, rng, observation, actions, *, delay, raw_action_dim):
         """Accumulate numerator/count across batches before dividing, avoiding mean-of-means."""

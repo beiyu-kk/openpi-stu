@@ -18,7 +18,7 @@ bbox (640 x 480 原图)
 → 二值区域 mask
 → 与 ResizeImages 相同的 resize-with-pad
 → 14 x 14 patch 覆盖率
-→ action query 到 right_wrist image key 的 attention logit bias
+→ 配置指定的 query（action/image/prompt）到 right_wrist image key 的 attention logit bias
 ```
 
 patch 覆盖率位于 `[0, 1]`，表示该 patch 中属于 bbox 区域的像素比例。对每个
@@ -28,9 +28,11 @@ patch 覆盖率位于 `[0, 1]`，表示该 patch 中属于 bbox 区域的像素�
 attention_logit_new = attention_logit + attention_bias_scale * patch_coverage
 ```
 
-bias 只作用在指定 Transformer 层和 query head 的 action token 到右腕图像 token
-连接上。默认随机保留一半有效 sample，并在训练进度 30% 到 70% 间从初始强度退火到
-零。因此模型不会在部署时依赖 bbox；`train=False` 和策略推理时该逻辑不执行。
+bias 只作用在指定 Transformer 层和 query head 的配置 query token 到右腕图像 token
+连接上。当前 attention-bias 配置显式选择 `action`、`image`、`prompt` 三类 query；
+默认 `RegionGuidanceConfig` 仍然是 action-only。默认随机保留一半有效 sample，并在
+训练进度 30% 到 70% 间从初始强度退火到零。因此模型不会在部署时依赖 bbox；
+`train=False` 和策略推理时该逻辑不执行。
 
 ## 1. 将精简标注写入 LeRobot
 

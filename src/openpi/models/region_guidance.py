@@ -1,20 +1,28 @@
-"""Training-only, parameter-free region guidance for action-to-image attention."""
+"""Training-only, parameter-free region guidance for selected query-to-image attention."""
 
 import dataclasses
 import math
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
 
+RegionQueryType = Literal["action", "image", "prompt"]
+REGION_QUERY_TYPES = ("action", "image", "prompt")
+
 
 @dataclasses.dataclass(frozen=True)
 class RegionGuidanceConfig:
-    # Initial additive attention-logit multiplier.  For a fully covered patch,
+    # Initial additive attention-logit multiplier. For a fully covered patch,
     # the pre-softmax logit receives ``attention_bias_scale`` before decay.
     attention_bias_scale: float = 0.5
     keep_probability: float = 0.5
     decay_start: float = 0.3
     decay_end: float = 0.7
+    # Query token types that may attend to annotated image patches. The default
+    # preserves the original action-query-only behavior. Named experiments can
+    # explicitly opt into image and prompt queries as well.
+    query_types: tuple[RegionQueryType, ...] = ("action",)
     # None selects the two middle layers and the first quarter of query heads.
     layers: tuple[int, ...] | None = None
     heads: tuple[int, ...] | None = None
@@ -26,6 +34,12 @@ class RegionGuidanceConfig:
             raise ValueError("Region guidance keep_probability must be in [0, 1]")
         if not 0 <= self.decay_start < self.decay_end < 1:
             raise ValueError("Region guidance requires 0 <= decay_start < decay_end < 1")
+        if (
+            not self.query_types
+            or len(set(self.query_types)) != len(self.query_types)
+            or any(query_type not in REGION_QUERY_TYPES for query_type in self.query_types)
+        ):
+            raise ValueError("Region guidance query_types must contain distinct values from action, image, prompt")
         for name in ("layers", "heads"):
             indices = getattr(self, name)
             if indices is not None and (
@@ -59,15 +73,44 @@ class RegionGuidanceConfig:
         return self.attention_bias_scale
 
 
+def query_mask(
+    total_queries: int,
+    *,
+    image_range: tuple[int, int] | None = None,
+    prompt_range: tuple[int, int] | None = None,
+    action_range: tuple[int, int] | None = None,
+    query_types: tuple[RegionQueryType, ...] = ("action",),
+) -> jax.Array:
+    """Build a static query mask for the configured token-type scopes.
+
+    The ranges are half-open positions in the full Transformer sequence. Keeping
+    this mask one-dimensional matches the existing grouped-head attention API;
+    padding and hard attention visibility are still enforced by the normal
+    per-example attention mask.
+    """
+    if total_queries < 0:
+        raise ValueError("total_queries must be nonnegative")
+    selected = jnp.zeros((total_queries,), dtype=jnp.bool_)
+    ranges = {"image": image_range, "prompt": prompt_range, "action": action_range}
+    for query_type in query_types:
+        if query_type not in REGION_QUERY_TYPES:
+            raise ValueError(f"Unknown region query type: {query_type}")
+        bounds = ranges[query_type]
+        if bounds is None:
+            continue
+        start, end = bounds
+        if not 0 <= start <= end <= total_queries:
+            raise ValueError(f"Invalid {query_type} query range {bounds} for sequence length {total_queries}")
+        selected = selected.at[start:end].set(True)
+    return selected
+
+
 def patch_coverage(masks, patch_size: int = 14, merge_size: int = 1):
     """Average pixel coverage, preserving the encoder's row-major patch order."""
     batch, height, width = masks.shape
     if height % patch_size or width % patch_size:
         raise ValueError("Region masks must have dimensions divisible by the image patch size")
-    coverage = (
-        masks.reshape(batch, height // patch_size, patch_size, width // patch_size, patch_size)
-        .mean(axis=(2, 4))
-    )
+    coverage = masks.reshape(batch, height // patch_size, patch_size, width // patch_size, patch_size).mean(axis=(2, 4))
     patch_height, patch_width = coverage.shape[1:]
     if type(merge_size) is not int or merge_size < 1:
         raise ValueError("merge_size must be a positive integer")

@@ -119,8 +119,10 @@ checkpoint 的续训过程中切换模式。
 `right_wrist_0_rgb`；base 和 left wrist mask 为零且无效。
 
 bbox 先在原始 `640×480` 坐标中栅格化，再按照 Pi0.5 的 resize-with-pad 几何映射到
-训练图像。模型随后按 14×14 patch 求覆盖率，并在训练期将 coverage 作为 action query
-到图像 key 的 attention bias。推理和 `train=False` 不使用 bias。
+训练图像。模型随后按 14×14 patch 求覆盖率，并在训练期将 coverage 作为配置中
+`action`、`image`、`prompt` query 到图像 key 的 attention bias。推理和 `train=False`
+不使用 bias。query 范围由 `RegionGuidanceConfig.query_types` 显式控制；默认值仍是
+`("action",)`。
 
 ## 验证
 

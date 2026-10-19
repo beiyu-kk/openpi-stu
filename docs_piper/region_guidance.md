@@ -1,7 +1,7 @@
 # Training-Only Region Attention Guidance
 
-This option uses the existing black-label annotations to bias action-to-image
-attention during training. It adds no auxiliary loss, model parameters, image
+This option uses the existing black-label annotations to bias configured
+query-to-image attention during training. It adds no auxiliary loss, model parameters, image
 views, detector, or inference inputs. Ordinary Piper configs keep their original
 behavior unless `--region-guidance` is specified. The dedicated
 `pi05_piper_full_finetune_rtc_attention_bias` config enables guidance directly.
@@ -62,7 +62,7 @@ count. Field locations, conversion, and inspection commands are documented in
 | Unguided phase | Final 30% of optimizer steps |
 | Layers | Two middle layers; indices 8 and 9 for the 18-layer pi0.5 |
 | Query heads | First quarter; indices 0 and 1 for pi0.5 |
-| Attention path | Action queries to image keys only |
+| Attention path | Configured query types (`action`, `image`, `prompt`) to annotated image keys |
 
 At 10,000 steps, attention-bias-scale/probability are 0.5/0.5 through step 3000,
 0.25/0.25 at step 5000, and exactly zero from step 7000 onward.
@@ -73,6 +73,21 @@ The multiplier is explicit in the model TrainConfig:
 ```python
 region_guidance=RegionGuidanceConfig(attention_bias_scale=1.5)
 ```
+
+The query scope is explicit in the model config. The original behavior is
+`query_types=("action",)`. The current bbox-guidance presets enable all three
+query types:
+
+```python
+region_guidance=RegionGuidanceConfig(
+    attention_bias_scale=0.5,
+    query_types=("action", "image", "prompt"),
+)
+```
+
+This applies the same annealed bias when image or prompt queries attend to
+annotated image patches. The key side remains the selected image patches; no
+bias is added to language or action keys.
 
 At the start of training, `attention_bias_scale=1.5` adds `+1.5` to a fully
 covered patch's pre-softmax attention logit; 40% coverage adds `+0.6`. The
@@ -104,15 +119,16 @@ images and masks: masks share cropping/rotation but skip color jitter. Fractiona
 coverage is averaged over each 14-by-14 image patch. At 448 pixels, each camera
 has a 32-by-32 patch grid.
 
-For the selected layers and heads, action queries receive:
+For the selected layers and heads, each configured query type receives:
 
 ```text
 logits' = logits + attention_bias_scale(step) * keep_gate * patch_coverage
 ```
 
 The original hard attention mask is applied afterward. Language keys, action
-keys, prefix queries and invalid camera keys receive no region bias. Gates are
-sampled once per example/camera and shared across selected layers and heads.
+keys and invalid camera keys receive no region bias. Query types that are not
+listed in `query_types` receive no region bias. Gates are sampled once per
+example/camera and shared across selected layers and heads.
 The baseline's image augmentation, action noise and flow timestep RNG streams
 are preserved. The original flow-matching action loss is unchanged.
 

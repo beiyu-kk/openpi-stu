@@ -1,4 +1,4 @@
-我重新核对了当前仓库里的实现。**现在这版 region-guidance 的核心，是在训练时利用已有区域标注，给模型内部“动作 token 关注目标图像区域”的注意力分数增加一个可逐渐撤掉的偏置。原来的动作损失保持不变，部署时不需要标注。**
+我重新核对了当前仓库里的实现。**现在这版 region-guidance 的核心，是在训练时利用已有区域标注，给模型内部配置的 query token（动作、图像或 prompt）关注目标图像区域的注意力分数增加一个可逐渐撤掉的偏置。原来的动作损失保持不变，部署时不需要标注。**
 
 它涉及标注读取、图像与掩码对齐、注意力计算和训练日程四部分。这里需要先说清楚：**当前没有新增一个学习“画面中是否存在任务相关文字”的预测器，也没有实现 KEM 式记忆模块。** 目前用的是已有标注来干预训练，希望这种训练最终改善模型自主利用目标区域信息的能力；这个效果还需要对照实验确认。
 
@@ -100,10 +100,10 @@ A_{ij}=\operatorname{softmax}_j(S_{ij}+C_{ij})
 
 其中 \(C\) 表示原有的注意力可见性约束。
 
-现在，在选定的层和注意力头里，对“动作 query → 图像 key”增加：
+现在，在选定的层和注意力头里，对配置中启用的 query 类型到“图像 key”增加：
 
 \[
-B_{b,j}=\lambda(t)\cdot z_{b,c(j)}
+B_{b,ij}=\mathbf{1}[i\in Q]\cdot\lambda(t)\cdot z_{b,c(j)}
 \cdot v_{b,c(j)}\cdot m_{b,j}
 \]
 
@@ -111,7 +111,7 @@ B_{b,j}=\lambda(t)\cdot z_{b,c(j)}
 A'_{b,ij}
 =
 \operatorname{softmax}_j
-\left(S_{b,ij}+B_{b,j}+C_{b,ij}\right)
+\left(S_{b,ij}+B_{b,ij}+C_{b,ij}\right)
 \]
 
 各项的含义是：
@@ -119,6 +119,7 @@ A'_{b,ij}
 | 符号 | 当前实现中的含义 |
 |---|---|
 | \(\lambda(t)\) | 当前训练步的偏置强度 |
+| \(Q\) | 配置中启用的 query 类型对应的 token 位置集合 |
 | \(z_{b,c}\) | 当前样本、当前相机是否启用引导的随机开关 |
 | \(v_{b,c}\) | 相机及其区域标注是否有效 |
 | \(m_{b,j}\) | 对应图像 patch 的区域覆盖率 |
@@ -149,17 +150,19 @@ e^{0.5}\approx1.65
 |---|---|
 | Transformer 层 | 索引 `8、9`，按 0 开始计数，即第 9、10 层 |
 | Query 注意力头 | 索引 `0、1` |
-| Query token | 动作 token |
+| Query token | 配置中的 `action`、`image`、`prompt` 类型（默认仅 `action`） |
 | Key token | 图像 token |
 | 区域权重 | 标注区域的 patch 覆盖率 |
 
-当前动作长度为 30 时，作用对象就是序列最后的 30 个动作 token。
+当前动作长度为 30 时，`action` 作用对象就是序列最后的 30 个动作 token；启用
+`image` 时，所有图像 token 都可以访问带有 bbox 覆盖率的图像 key；启用 `prompt`
+时，prompt token 也可以访问这些图像 key。
 
 这发生在已有的 Transformer 注意力计算中，没有额外增加一层 cross-attention。SigLIP 内部的视觉自注意力也没有改动。
 
 选择部分中间层、部分头，是为了给目标区域增加一条受引导的信息路径，同时保留其他注意力头处理环境、机械臂、障碍物和放置位置的能力。**这组层和头只是实验起点，还没有证明是最优选择。**
 
-此外，同一相机的区域偏置会共享给被选中的动作 query。当前没有根据“正在识别、正在抓取、正在放置”分别决定是否引导，也没有学习不同动作时刻该关注多少。
+此外，同一相机的区域偏置会共享给被选中的 query。当前没有根据“正在识别、正在抓取、正在放置”分别决定是否引导，也没有学习不同动作时刻该关注多少。
 
 **为了降低模型对训练标注的依赖，引导会随机关闭，并在训练后期完全撤掉。**
 
@@ -239,9 +242,10 @@ region_guidance = None
 ```
 
 才会启用。命名配置 `pi05_piper_full_finetune_rtc_attention_bias` 已经内置
-`region_guidance`，选择该配置后不需要重复传这个开关；只有覆盖下列默认参数时才需要
-显式传入。bbox 直接从 `--dataset-dir` 指向的 LeRobot episode parquet 读取，没有
-额外标注目录参数。其他主要参数为：
+`region_guidance`，并在 config 中显式设置了
+`query_types=("action", "image", "prompt")`。选择该配置后不需要重复传这个开关；
+只有覆盖下列默认参数时才需要显式传入。bbox 直接从 `--dataset-dir` 指向的 LeRobot
+episode parquet 读取，没有额外标注目录。其他主要参数为：
 
 ```bash
 --attention-bias-scale 0.5
@@ -276,7 +280,7 @@ region/valid_fraction/<camera>
 | [data_loader.py](/home/ubun/project/stu_vla/openpi-stu/src/openpi/training/data_loader.py:182) | 按配置选择原数据包装器或区域标注包装器 |
 | [model.py](/home/ubun/project/stu_vla/openpi-stu/src/openpi/models/model.py:153) | 图像与区域掩码同步预处理和几何增强 |
 | [region_guidance.py](/home/ubun/project/stu_vla/openpi-stu/src/openpi/models/region_guidance.py:11) | 参数配置、退火、patch 覆盖率、随机开关与偏置计算 |
-| [pi0.py](/home/ubun/project/stu_vla/openpi-stu/src/openpi/models/pi0.py:194) | 在训练前向中构造动作 query、图像 key 的引导范围 |
+| [pi0.py](/home/ubun/project/stu_vla/openpi-stu/src/openpi/models/pi0.py:194) | 在训练前向中构造配置 query、图像 key 的引导范围 |
 | [gemma.py](/home/ubun/project/stu_vla/openpi-stu/src/openpi/models/gemma.py:165) | 在 softmax 前注入注意力偏置，并逐层传递控制信息 |
 | [train_piper.py](/home/ubun/project/stu_vla/openpi-stu/scripts/train_piper.py:52) | 命令行开关与配置构建 |
 | [train.py](/home/ubun/project/stu_vla/openpi-stu/scripts/train.py:138) | 按训练步计算日程、记录日志、检查恢复配置 |

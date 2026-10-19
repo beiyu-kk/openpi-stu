@@ -34,6 +34,11 @@ class Pi0Config(_model.BaseModelConfig):
     image_token_camera_keys: tuple[str, ...] = _model.IMAGE_KEYS
     # Disabled by default. No extra parameters or inference inputs are introduced.
     region_guidance: RegionGuidanceConfig | None = None
+    # When enabled, train the VLM backbone with FAST discrete action tokens while
+    # insulating it from continuous action-expert gradients, as in Knowledge
+    # Insulation (Driess et al., 2025).
+    knowledge_insulation: bool = False
+    discrete_action_loss_weight: float = 1.0
 
     # Set the model specific defaults.
     action_dim: int = 32
@@ -78,6 +83,10 @@ class Pi0Config(_model.BaseModelConfig):
                 raise ValueError("Full RTC fine-tuning requires a pi05 RTC model")
             if "lora" in self.paligemma_variant or "lora" in self.action_expert_variant:
                 raise ValueError("Full RTC fine-tuning uses base Transformer variants without LoRA adapters")
+        if not math.isfinite(self.discrete_action_loss_weight) or self.discrete_action_loss_weight < 0:
+            raise ValueError("discrete_action_loss_weight must be finite and nonnegative")
+        if self.knowledge_insulation and self.discrete_action_loss_weight <= 0:
+            raise ValueError("knowledge_insulation requires a positive discrete_action_loss_weight")
         if (
             len(self.image_resolution) != 2
             or any(type(size) is not int or size <= 0 or size % 14 != 0 for size in self.image_resolution)
@@ -95,7 +104,9 @@ class Pi0Config(_model.BaseModelConfig):
             raise ValueError("image patch grid must be divisible by image_token_merge_size")
         if self.image_token_merger == "none" and self.image_token_merge_size != 2:
             raise ValueError("image_token_merge_size is only configurable when image_token_merger='spatial_2x2'")
-        if not self.image_token_camera_keys or len(set(self.image_token_camera_keys)) != len(self.image_token_camera_keys):
+        if not self.image_token_camera_keys or len(set(self.image_token_camera_keys)) != len(
+            self.image_token_camera_keys
+        ):
             raise ValueError("image_token_camera_keys must contain distinct camera keys")
         if any(key not in _model.IMAGE_KEYS for key in self.image_token_camera_keys):
             raise ValueError("image_token_camera_keys contains an unknown camera key")
@@ -148,6 +159,16 @@ class Pi0Config(_model.BaseModelConfig):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                token_ar_mask=(
+                    jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32)
+                    if self.knowledge_insulation
+                    else None
+                ),
+                token_loss_mask=(
+                    jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.bool_)
+                    if self.knowledge_insulation
+                    else None
+                ),
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 

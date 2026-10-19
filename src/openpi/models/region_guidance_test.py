@@ -50,6 +50,27 @@ def test_attention_bias_preserves_hard_mask():
     np.testing.assert_array_equal(biased[0], baseline[0])
 
 
+def test_query_mask_supports_image_prompt_and_action_scopes():
+    actual = rg.query_mask(
+        12,
+        image_range=(0, 4),
+        prompt_range=(4, 7),
+        action_range=(9, 12),
+        query_types=("image", "prompt"),
+    )
+    np.testing.assert_array_equal(actual, [True, True, True, True, True, True, True, False, False, False, False, False])
+    actual = rg.query_mask(
+        12,
+        image_range=(0, 4),
+        prompt_range=(4, 7),
+        action_range=(9, 12),
+        query_types=("action",),
+    )
+    np.testing.assert_array_equal(
+        actual, [False, False, False, False, False, False, False, False, False, True, True, True]
+    )
+
+
 @pytest.mark.parametrize(("step", "expected"), [(0, 0.5), (3000, 0.5), (5000, 0.25), (7000, 0), (9999, 0)])
 def test_schedule(step, expected):
     strength, probability = jax.jit(lambda s: rg.RegionGuidanceConfig().schedule(s, 10000))(step)
@@ -64,6 +85,9 @@ def test_schedule(step, expected):
         {"keep_probability": 1.1},
         {"decay_start": 0.8},
         {"decay_end": 1},
+        {"query_types": ()},
+        {"query_types": ("image", "image")},
+        {"query_types": ("unknown",)},
         {"layers": ()},
         {"heads": (0, 0)},
     ],
@@ -151,7 +175,9 @@ def test_guided_loss_gradients_checkpoint_compatibility_and_unbiased_inference(s
     config = pi0_config.Pi0Config(
         pi05=True, image_resolution=(28, 28), action_horizon=2, max_token_len=4, dtype="float32"
     )
-    guided_config = dataclasses.replace(config, region_guidance=rg.RegionGuidanceConfig())
+    guided_config = dataclasses.replace(
+        config, region_guidance=rg.RegionGuidanceConfig(query_types=("action", "image", "prompt"))
+    )
     baseline = config.create(jax.random.key(0))
     guided = guided_config.create(jax.random.key(0))
     old_params, new_params = nnx.state(baseline).to_pure_dict(), nnx.state(guided).to_pure_dict()

@@ -56,13 +56,12 @@ def test_piper_finetune_configs():
     assert attention_bias.model.image_resolution == (224, 224)
     assert attention_bias.model.region_guidance is not None
     assert attention_bias.model.region_guidance.attention_bias_scale == 0.5
+    assert attention_bias.model.region_guidance.query_types == ("action", "image", "prompt")
     assert attention_bias.data.base_config.region_annotation_mode == "book"
 
     expected_delay_weights = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 4.0, 12.0, 6.0)
     for scale, scale_name in ((0.5, "0_5"), (2, "2"), (5, "5")):
-        attention_bias_d9 = _config.get_config(
-            f"pi05_piper_full_finetune_rtc_attention_bias_448_d9_scale_{scale_name}"
-        )
+        attention_bias_d9 = _config.get_config(f"pi05_piper_full_finetune_rtc_attention_bias_448_d9_scale_{scale_name}")
         assert attention_bias_d9.training_rtc is not None
         assert attention_bias_d9.training_rtc.max_delay == 9
         assert attention_bias_d9.training_rtc.delay_weights == expected_delay_weights
@@ -71,6 +70,7 @@ def test_piper_finetune_configs():
         assert attention_bias_d9.model.simulated_delay_weights == expected_delay_weights
         assert attention_bias_d9.model.region_guidance is not None
         assert attention_bias_d9.model.region_guidance.attention_bias_scale == scale
+        assert attention_bias_d9.model.region_guidance.query_types == ("action", "image", "prompt")
         assert attention_bias_d9.data.base_config.region_annotation_mode == "book"
 
     merged = _config.get_config("pi05_piper_full_finetune_rtc_attention_bias_448_d9_scale_0_5_merge2")
@@ -78,6 +78,7 @@ def test_piper_finetune_configs():
     assert merged.model.image_token_merger == "spatial_2x2"
     assert merged.model.image_token_merge_size == 2
     assert merged.model.image_token_camera_keys == ("base_0_rgb", "right_wrist_0_rgb")
+    assert merged.model.region_guidance.query_types == ("action", "image", "prompt")
 
 
 def test_checkpoint_dir_override(tmp_path):

@@ -43,6 +43,10 @@ def source_digest():
 
 def model_values(values):
     values = dict(values)
+    # These fields were added after the original RTC manifests. Their absence
+    # means the pre-Knowledge-Insulation continuous-only behavior.
+    values.setdefault("knowledge_insulation", False)
+    values.setdefault("discrete_action_loss_weight", 1.0)
     values["image_resolution"] = tuple(values["image_resolution"])
     if values.get("image_token_camera_keys") is not None:
         values["image_token_camera_keys"] = tuple(values["image_token_camera_keys"])
@@ -57,7 +61,7 @@ def model_values(values):
             guidance["attention_bias_scale"] = guidance.pop("strength")
         else:
             guidance.pop("strength", None)
-        for name in ("layers", "heads"):
+        for name in ("query_types", "layers", "heads"):
             if guidance.get(name) is not None:
                 guidance[name] = tuple(guidance[name])
         values["region_guidance"] = RegionGuidanceConfig(**guidance)
@@ -175,7 +179,21 @@ def prepare_resume(config):
 def record(config, manifest, *, resuming):
     path = config.checkpoint_dir / "training_rtc.json"
     if resuming:
-        if not path.exists() or json.loads(path.read_text()) != manifest:
+        if not path.exists():
+            raise ValueError("RTC resume configuration, data, or normalization differs from the saved experiment")
+        saved = json.loads(path.read_text())
+        saved.setdefault("model", {}).setdefault("knowledge_insulation", False)
+        saved["model"].setdefault("discrete_action_loss_weight", 1.0)
+        # RTC resume records written before query scopes became configurable
+        # omitted this field; those runs were action-query-only by definition.
+        guidance = saved.get("model", {}).get("region_guidance")
+        if guidance:
+            if "attention_bias_scale" not in guidance and "strength" in guidance:
+                guidance["attention_bias_scale"] = guidance.pop("strength")
+            else:
+                guidance.pop("strength", None)
+            guidance.setdefault("query_types", ["action"])
+        if saved != manifest:
             raise ValueError("RTC resume configuration, data, or normalization differs from the saved experiment")
     else:
         path.write_text(json.dumps(manifest, indent=2) + "\n")
