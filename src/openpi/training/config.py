@@ -529,11 +529,40 @@ def prepare_rtc_base(config: TrainConfig) -> TrainConfig:
     return resolve_training_config(config)
 
 
+# Fine-tuning Piper configs.
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
-    # Fine-tuning Piper configs.
+    ## Lora
     #
+
+    TrainConfig(
+        name="pi05_piper_lora_finetune_rtc",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            image_resolution=(224, 224),
+            action_expert_variant="gemma_300m_lora",
+        ),
+        training_rtc=TrainingRTCConfig(finetune_mode="lora", max_delay=4),
+        data=LeRobotPiperDataConfig(base_config=DataConfig(prompt_from_task=True)),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500, peak_lr=2.5e-5, decay_steps=10000, decay_lr=2.5e-6
+        ),
+        batch_size=16,
+        num_train_steps=10000,
+        save_interval=1000,
+        keep_period=5000,
+        ema_decay=None,
+    ),
+
+    #
+    ## 原始 openpi
+    #
+
     TrainConfig(
         name="pi05_piper_full_finetune",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=30, image_resolution=(224, 224)),
@@ -581,6 +610,11 @@ _CONFIGS = [
         save_interval=1000,
         keep_period=1_000,
     ),
+
+    #
+    ##  原始 openpi + TT-RTC
+    #
+
     # RTC is enabled only by training_rtc; the launcher needs no separate RTC flag.
     TrainConfig(
         name="pi05_piper_full_finetune_rtc",
@@ -597,6 +631,11 @@ _CONFIGS = [
         keep_period=5000,
         ema_decay=None,
     ),
+
+    #
+    ## openpi + TT-RTC + attention bias (action) + image_resize 448
+    #
+
     # Full Pi0.5 RTC fine-tuning with training-only bbox attention bias.
     # The launcher reads embedded annotations at runtime; ordinary Piper configs
     # remain free of annotation processing and attention modifications.
@@ -607,7 +646,7 @@ _CONFIGS = [
             action_horizon=30,
             image_resolution=(224, 224),
             region_guidance=pi0_config.RegionGuidanceConfig(
-                attention_bias_scale=0.5, query_types=("action", "image", "prompt")
+                attention_bias_scale=0.5, query_types=("action")
             ),
         ),
         training_rtc=TrainingRTCConfig(finetune_mode="full", max_delay=4),
@@ -715,10 +754,53 @@ _CONFIGS = [
         keep_period=5000,
         ema_decay=None,
     ),
+
+    #
+    ## openpi + TT-RTC + at bias (action, image, prompt) + image_resize 448 + 2x2 merge
+    #
+
     # 448x448 SigLIP with Qwen-style 2x2 spatial token merging.
     TrainConfig(
-        name="pi05_piper_full_finetune_rtc_attention_bias_448_d9_scale_0_5_merge2",
+        name="pi05_piper_full_finetune_rtc_d9_r448_at_bias_s5_merge2",
         model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            image_resolution=(448, 448),
+            image_token_merger="spatial_2x2",
+            image_token_merge_size=2,
+            image_token_camera_keys=("base_0_rgb", "right_wrist_0_rgb"),
+            region_guidance=pi0_config.RegionGuidanceConfig(
+                attention_bias_scale=5, query_types=("action", "image", "prompt")
+            ),
+        ),
+        training_rtc=TrainingRTCConfig(
+            finetune_mode="full",
+            max_delay=9,
+            delay_weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 4.0, 12.0, 6.0),
+        ),
+        data=LeRobotPiperDataConfig(
+            base_config=DataConfig(prompt_from_task=True, region_annotation_mode="book"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=500, peak_lr=1e-5, decay_steps=10000, decay_lr=1e-6),
+        batch_size=32,
+        num_train_steps=10000,
+        save_interval=1000,
+        keep_period=5000,
+        ema_decay=None,
+    ),
+
+    #
+    ## openpi + TT-RTC + at bias (action, image, prompt) + image_resize 448 + 2x2 merge + KI + Fast token
+    #
+
+    TrainConfig(
+        name="pi05_piper_full_finetune_rtc_attention_bias_448_d9_scale_0_5_merge2_KI",
+        model=pi0_config.Pi0Config(
+            knowledge_insulation=True,
+            discrete_action_loss_weight=1.0,
             pi05=True,
             action_horizon=30,
             image_resolution=(448, 448),
@@ -747,28 +829,8 @@ _CONFIGS = [
         keep_period=5000,
         ema_decay=None,
     ),
-    TrainConfig(
-        name="pi05_piper_lora_finetune_rtc",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=30,
-            image_resolution=(224, 224),
-            action_expert_variant="gemma_300m_lora",
-        ),
-        training_rtc=TrainingRTCConfig(finetune_mode="lora", max_delay=4),
-        data=LeRobotPiperDataConfig(base_config=DataConfig(prompt_from_task=True)),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
-        ),
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=500, peak_lr=2.5e-5, decay_steps=10000, decay_lr=2.5e-6
-        ),
-        batch_size=16,
-        num_train_steps=10000,
-        save_interval=1000,
-        keep_period=5000,
-        ema_decay=None,
-    ),
+
+
     #
     # Debugging configs.
     #
