@@ -761,7 +761,7 @@ _CONFIGS = [
 
     # 448x448 SigLIP with Qwen-style 2x2 spatial token merging.
     TrainConfig(
-        name="pi05_piper_full_finetune_rtc_d9_r448_at_bias_s5_merge2",
+        name="pi05_piper_full_finetune_rtc_d9_r448_merge2_at_bias_s5",
         model=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=30,
