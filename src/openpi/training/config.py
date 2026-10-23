@@ -616,7 +616,7 @@ _CONFIGS = [
     #
 
     TrainConfig(
-        name="pi05_piper_ft_i448_at3_s5",
+        name="pi05_piper_ft_image448_at3_s5",
         model=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=30,
