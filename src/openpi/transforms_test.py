@@ -5,6 +5,46 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.transforms as _transforms
 
 
+@pytest.mark.parametrize("shape", [(480, 640), (640, 480), (240, 320), (423, 627), (640, 640)])
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32])
+def test_pad_only_keeps_source_pixels(shape, dtype):
+    image = np.random.default_rng(0).integers(0, 256, (*shape, 3), dtype=np.uint8)
+    if dtype == np.float32:
+        image = image.astype(np.float32) / 127.5 - 1
+    transform = _transforms.ResizeImages(640, 640, mode="pad_only")
+    padded = transform({"image": {"camera": image}})["image"]["camera"]
+    expected = np.full((640, 640, 3), 0 if dtype == np.uint8 else -1.0, dtype=dtype)
+    top, left = (640 - shape[0]) // 2, (640 - shape[1]) // 2
+    expected[top : top + shape[0], left : left + shape[1]] = image
+    assert isinstance(padded, np.ndarray)
+    assert padded.dtype == image.dtype
+    np.testing.assert_array_equal(padded, expected)
+
+
+@pytest.mark.parametrize("shape", [(641, 480), (480, 641)])
+def test_pad_only_rejects_oversized_images(shape):
+    transform = _transforms.ResizeImages(640, 640, mode="pad_only")
+    with pytest.raises(ValueError, match="never resizes"):
+        transform({"image": {"camera": np.zeros((*shape, 3), dtype=np.uint8)}})
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32])
+def test_pad_to_square_preserves_each_camera_at_its_native_size(dtype):
+    shapes = {"head": (480, 640), "wrist": (720, 1280), "portrait": (51, 32)}
+    images = {
+        key: np.random.default_rng(0).integers(0, 255, (*shape, 3), dtype=np.uint8) for key, shape in shapes.items()
+    }
+    if dtype == np.float32:
+        images = {key: image.astype(np.float32) / 127.5 - 1 for key, image in images.items()}
+    result = _transforms.ResizeImages(224, 224, mode="pad_to_square")({"image": images.copy()})
+    for key, image in images.items():
+        side = max(image.shape[:2])
+        top, left = (side - image.shape[0]) // 2, (side - image.shape[1]) // 2
+        expected = np.full((side, side, 3), 0 if dtype == np.uint8 else -1.0, dtype=dtype)
+        expected[top : top + image.shape[0], left : left + image.shape[1]] = image
+        np.testing.assert_array_equal(result["image"][key], expected)
+
+
 def test_repack_transform():
     transform = _transforms.RepackTransform(
         structure={

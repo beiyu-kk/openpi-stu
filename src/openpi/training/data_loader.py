@@ -1,5 +1,6 @@
 from collections.abc import Iterator, Sequence
 import dataclasses
+import functools
 import logging
 import multiprocessing
 import os
@@ -82,6 +83,10 @@ class IterableTransformedDataset(IterableDataset[T_co]):
         self._dataset = dataset
         self._transform = _transforms.compose(transforms)
         self._is_batched = is_batched
+        self._dynamic_images = any(
+            isinstance(transform, _transforms.ResizeImages) and transform.mode == "pad_to_square"
+            for transform in transforms
+        )
 
     def __iter__(self):
         for sample in self._dataset:
@@ -96,8 +101,8 @@ class IterableTransformedDataset(IterableDataset[T_co]):
                 # Transform each sample
                 transformed = [self._transform(s) for s in individual_samples]
 
-                # Recombine batch with tree_map
-                yield jax.tree.map(lambda *x: np.stack(x, axis=0), *transformed)
+                # Dynamic image canvases need padding before they can be stacked.
+                yield _collate_fn(transformed, pad_images_to_square=self._dynamic_images)
             else:
                 yield self._transform(sample)
 
@@ -233,6 +238,10 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
             dataset,
             _transforms.compose(transforms),
             mode=data_config.region_annotation_mode,
+            image_resize_mode=next(
+                (transform.mode for transform in transforms if isinstance(transform, _transforms.ResizeImages)),
+                "resize_with_pad",
+            ),
         )
     return TransformedDataset(
         dataset,
@@ -291,6 +300,8 @@ def create_data_loader(
     config = _config.resolve_training_config(config)
     if config.training_rtc is not None and framework != "jax":
         raise ValueError("Training RTC supports JAX only")
+    if config.model.pad_to_square and framework != "jax":
+        raise ValueError("Dynamic image sizes currently support JAX only")
     data_config = resolve_rtc_episodes(config.data.create(config.assets_dirs, config.model))
     region_guidance = getattr(config.model, "region_guidance", None)
     if region_guidance is not None:
@@ -407,6 +418,7 @@ def create_torch_data_loader(
         num_workers=num_workers,
         seed=seed,
         framework=framework,
+        pad_images_to_square=model_config.pad_to_square,
     )
 
     return DataLoaderImpl(data_config, data_loader)
@@ -468,6 +480,7 @@ class TorchDataLoader:
         num_workers: int = 0,
         seed: int = 0,
         framework: str = "jax",
+        pad_images_to_square: bool = False,
     ):
         """Create a PyTorch data loader.
 
@@ -514,7 +527,7 @@ class TorchDataLoader:
             num_workers=num_workers,
             multiprocessing_context=mp_context,
             persistent_workers=num_workers > 0,
-            collate_fn=_collate_fn,
+            collate_fn=functools.partial(_collate_fn, pad_images_to_square=pad_images_to_square),
             worker_init_fn=_worker_init_fn,
             drop_last=True,
             generator=generator,
@@ -543,8 +556,26 @@ class TorchDataLoader:
                     yield jax.tree.map(torch.as_tensor, batch)
 
 
-def _collate_fn(items):
+def _collate_fn(items, *, pad_images_to_square=False):
     """Collate the batch elements into batched numpy arrays."""
+    if pad_images_to_square:
+        # Each image is already square. Match shapes per camera within this
+        # batch using padding alone; other cameras and later batches may differ.
+        items = [{**item, "image": dict(item["image"])} for item in items]
+        for item in items:
+            if item.get("region_masks") is not None:
+                item["region_masks"] = dict(item["region_masks"])
+        for camera in items[0]["image"]:
+            side = max(max(item["image"][camera].shape[:2]) for item in items)
+            for item in items:
+                image = np.asarray(item["image"][camera])
+                top, left = (side - image.shape[0]) // 2, (side - image.shape[1]) // 2
+                padding = ((top, side - image.shape[0] - top), (left, side - image.shape[1] - left))
+                item["image"][camera] = np.pad(
+                    image, (*padding, (0, 0)), constant_values=0 if image.dtype == np.uint8 else -1.0
+                )
+                if item.get("region_masks") is not None:
+                    item["region_masks"][camera] = np.pad(item["region_masks"][camera], padding)
     # Make sure to convert to numpy arrays before stacking since some of the incoming elements
     # may be JAX arrays.
     return jax.tree.map(lambda *xs: np.stack([np.asarray(x) for x in xs], axis=0), *items)

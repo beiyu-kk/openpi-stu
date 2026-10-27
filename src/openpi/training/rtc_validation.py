@@ -27,6 +27,12 @@ def summarize(totals, *, raw_action_dim, model_action_dim, reduction):
     for d, count in enumerate(totals["active_tokens"]):
         key = f"rtc_val/d{d}"
         result[f"{key}/active_tokens"] = int(count)
+        if "negative_log_likelihood" in totals:
+            ce = float(totals["negative_log_likelihood"][d] / count) if count else None
+            result[f"{key}/loss"] = ce
+            result[f"{key}/token_ce"] = ce
+            result[f"{key}/token_accuracy"] = float(totals["correct_tokens"][d] / count) if count else None
+            continue
         # A delay stratum without targets is not a zero-error success.
         if count == 0:
             result[f"{key}/loss"] = None

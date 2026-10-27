@@ -133,6 +133,60 @@ class FASTTokenizer:
             [action_tokens.tolist()], time_horizon=action_horizon, action_dim=action_dim
         )[0]
 
+    def extract_rtc_actions(self, tokens, action_horizon, action_dim):
+        """Reject incomplete/malformed FAST output instead of executing a zero fallback."""
+        tokens = np.asarray(tokens, dtype=np.int32).tolist()
+        marker = self._paligemma_tokenizer.encode("Action: ")
+        ending = self._paligemma_tokenizer.encode("|", add_eos=True)
+        if tokens[: len(marker)] != marker:
+            raise ValueError("FAST RTC output is missing the Action marker")
+        ends = [i for i in range(len(marker), len(tokens)) if tokens[i : i + len(ending)] == ending]
+        if not ends:
+            raise ValueError("FAST RTC output is incomplete; increase max_decoding_steps or improve the model")
+        actions = self._act_tokens_to_paligemma_tokens(np.asarray(tokens[len(marker) : ends[0]], dtype=np.int32))
+        if not len(actions) or np.any(actions < 0) or np.any(actions >= self._fast_tokenizer.vocab_size):
+            raise ValueError("FAST RTC output contains invalid action tokens")
+        coefficients = self._fast_tokenizer.bpe_tokenizer.decode(actions.tolist())
+        if len(coefficients) != action_horizon * action_dim:
+            raise ValueError("FAST RTC output does not match the requested suffix horizon")
+        return self._fast_tokenizer.decode([actions.tolist()], time_horizon=action_horizon, action_dim=action_dim)[
+            0
+        ].astype(np.float32)
+
+    def tokenize_rtc(self, prompt, state, prefix, suffix, *, delay, suffix_horizon):
+        """Encode committed actions separately; FAST tokens have no per-frame alignment.
+
+        Only the independently encoded suffix and its delimiters are targets.
+        Overflow is an error because truncating DCT/BPE changes the trajectory.
+        """
+        cleaned = prompt.lower().strip().replace("_", " ")
+        bins = np.digitize(state, bins=np.linspace(-1, 1, 257)[:-1]) - 1
+        context = self._paligemma_tokenizer.encode(
+            f"Task: {cleaned}, State: {' '.join(map(str, bins))};\nDelay: {delay}, Horizon: {suffix_horizon}; Prefix: ",
+            add_bos=True,
+        )
+        if len(prefix):
+            context += self._act_tokens_to_paligemma_tokens(self._fast_tokenizer(prefix[None])[0]).tolist()
+        context += self._paligemma_tokenizer.encode("|\n")
+        target = []
+        if suffix is not None and len(suffix):
+            if len(suffix) != suffix_horizon:
+                raise ValueError("FAST RTC suffix length must match its decoding horizon")
+            target = (
+                self._paligemma_tokenizer.encode("Action: ")
+                + self._act_tokens_to_paligemma_tokens(self._fast_tokenizer(suffix[None])[0]).tolist()
+                + self._paligemma_tokenizer.encode("|", add_eos=True)
+            )
+        if len(context) + len(target) > self._max_len:
+            raise ValueError("FAST RTC tokens exceed max_token_len; increase it in the train config")
+        padding = self._max_len - len(context) - len(target)
+        return (
+            np.asarray(context + target + [0] * padding, dtype=np.int32),
+            np.asarray([True] * (len(context) + len(target)) + [False] * padding),
+            np.asarray([0] * len(context) + [1] * len(target) + [0] * padding, dtype=np.int32),
+            np.asarray([False] * len(context) + [True] * len(target) + [False] * padding),
+        )
+
     def _act_tokens_to_paligemma_tokens(self, tokens: np.ndarray | list[int]) -> np.ndarray:
         if isinstance(tokens, list):
             tokens = np.array(tokens)

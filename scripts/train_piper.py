@@ -6,7 +6,6 @@ import json
 import logging
 import pathlib
 
-from openpi.models import pi0_config
 from openpi.models.region_guidance import RegionGuidanceConfig
 from openpi.training import config as _config
 from openpi.training import weight_loaders
@@ -17,13 +16,6 @@ if __package__:
 else:
     import compute_norm_stats
     import train
-
-
-def _parse_image_size(value: str) -> int:
-    size = int(value)
-    if size <= 0 or size % 14 != 0:
-        raise argparse.ArgumentTypeError("Image size must be a positive multiple of 14 (e.g. 224, 336, 448).")
-    return size
 
 
 def _resolve_base_params_path(value: str) -> str:
@@ -83,10 +75,6 @@ def _build_config(args: argparse.Namespace) -> _config.TrainConfig:
             ),
         )
     model = base_config.model
-    if args.image_size is not None:
-        if not isinstance(model, pi0_config.Pi0Config):
-            raise ValueError("--image-size requires a Pi0Config model")
-        model = dataclasses.replace(model, image_resolution=(args.image_size, args.image_size))
     # The named attention-bias config enables guidance itself. The flag also
     # turns it on for the ordinary baseline configs, preserving their defaults.
     guidance_enabled = getattr(model, "region_guidance", None) is not None or getattr(args, "region_guidance", False)
@@ -148,11 +136,6 @@ def _parse_args() -> argparse.Namespace:
         "--config",
         default="pi05_piper_full_finetune",
         help="TrainConfig name registered in src/openpi/training/config.py.",
-    )
-    parser.add_argument(
-        "--image-size",
-        type=_parse_image_size,
-        help="Square image size for preprocessing and the model; defaults to the selected config (Piper: 224).",
     )
     parser.add_argument("--dataset-dir", required=True, help="Root directory of the local LeRobot dataset.")
     parser.add_argument("--dataset-repo-id", required=True, help="Logical ID used for dataset assets in checkpoints.")
@@ -247,10 +230,16 @@ def main() -> None:
     logging.info("Base model params: %s", config.weight_loader.params_path)
     logging.info("Checkpoint output: %s", config.checkpoint_dir)
     logging.info("Fine-tuning config: %s (batch size %d)", config.name, config.batch_size)
-    logging.info("Image resolution: %s", config.model.image_resolution)
+    if config.model.pad_to_square:
+        logging.info("Image resolution: native sizes; position embedding reference: %s", config.model.image_resolution)
+    else:
+        logging.info("Image resolution: %s", config.model.image_resolution)
+    logging.info("Pad to square: %s", config.model.pad_to_square)
+    if not config.model.pad_to_square:
+        logging.info("Image resize mode: %s", config.model.image_resize_mode)
     if config.training_rtc is not None:
         logging.info("Training RTC: %s", config.training_rtc)
-    if config.model.region_guidance is not None:
+    if getattr(config.model, "region_guidance", None) is not None:
         logging.info("Training-only region guidance: %s", config.model.region_guidance)
     train.main(config)
 

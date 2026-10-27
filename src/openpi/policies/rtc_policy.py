@@ -10,6 +10,7 @@ import numpy as np
 
 from openpi.models import model as _model
 from openpi.policies.policy import Policy
+from openpi.shared import nnx_utils
 
 
 def integer(value, name):
@@ -36,9 +37,27 @@ class TrainingRTCPolicy(Policy):
         if self._model.simulated_delay is None:
             raise ValueError("TrainingRTCPolicy requires simulated_delay")
         self._raw_action_dim = raw_action_dim
-        steps = self._sample_kwargs.get("num_steps", 10)
-        if integer(steps, "num_steps") <= 0:
-            raise ValueError("num_steps must be positive")
+        self._uses_fast = getattr(self._model, "rtc_action_tokens", False)
+        if self._uses_fast:
+            unsupported = set(self._sample_kwargs) - {"max_decoding_steps", "temperature"}
+            if unsupported:
+                raise ValueError(f"Unsupported FAST RTC sampling options: {sorted(unsupported)}")
+            self._sample_kwargs = dict(self._sample_kwargs)
+            self._sample_kwargs.setdefault("max_decoding_steps", self._model.max_token_len)
+            steps = self._sample_kwargs["max_decoding_steps"]
+            if integer(steps, "max_decoding_steps") <= 0:
+                raise ValueError("max_decoding_steps must be positive")
+            temperature = self._sample_kwargs.get("temperature", 0.0)
+            if not np.isfinite(temperature) or temperature < 0:
+                raise ValueError("temperature must be finite and nonnegative")
+            # The decode limit sets KV-cache shapes and must be static under JIT.
+            self._sample_actions = nnx_utils.module_jit(
+                self._model.sample_actions, static_argnames=("max_decoding_steps",)
+            )
+        else:
+            steps = self._sample_kwargs.get("num_steps", 10)
+            if integer(steps, "num_steps") <= 0:
+                raise ValueError("num_steps must be positive")
 
     def infer(self, obs, *, noise=None):
         inputs = copy.deepcopy(obs)
@@ -64,6 +83,10 @@ class TrainingRTCPolicy(Policy):
             raise ValueError("state must match raw_action_dim and contain finite values")
         inputs["actions"] = np.broadcast_to(state, (self._model.action_horizon, self._raw_action_dim)).copy()
         inputs["actions"][:delay] = prefix
+        if self._uses_fast:
+            if noise is not None:
+                raise ValueError("FAST RTC uses autoregressive sampling, not flow noise")
+            inputs["rtc_delay"] = delay
         inputs = self._input_transform(inputs)
         normalized_prefix = np.asarray(inputs.pop("actions"), dtype=np.float32)
         if normalized_prefix.shape != (self._model.action_horizon, self._model.action_dim):
@@ -73,7 +96,10 @@ class TrainingRTCPolicy(Policy):
         inputs = jax.tree.map(lambda x: jnp.asarray(x)[None], inputs)
         self._rng, rng = jax.random.split(self._rng)
         kwargs = dict(self._sample_kwargs)
-        kwargs.update(rtc_prefix=jnp.asarray(normalized_prefix)[None], rtc_delay=jnp.asarray([delay], dtype=jnp.int32))
+        if not self._uses_fast:
+            kwargs.update(
+                rtc_prefix=jnp.asarray(normalized_prefix)[None], rtc_delay=jnp.asarray([delay], dtype=jnp.int32)
+            )
         if noise is not None:
             noise = np.asarray(noise, dtype=np.float32)
             if noise.shape != (self._model.action_horizon, self._model.action_dim) or not np.isfinite(noise).all():
@@ -82,7 +108,10 @@ class TrainingRTCPolicy(Policy):
         t0 = time.monotonic()
         actions = self._sample_actions(rng, _model.Observation.from_dict(inputs), **kwargs)
         # Conversion synchronizes JAX so infer_ms includes device execution.
+        # Unnormalize restores both state and actions before AbsoluteActions rebases the chunk.
         outputs = {"state": np.asarray(inputs["state"][0]), "actions": np.asarray(actions[0])}
+        if self._uses_fast:
+            outputs.update(rtc_prefix=normalized_prefix, rtc_delay=delay)
         outputs = self._output_transform(outputs)
         actions = np.asarray(outputs["actions"], dtype=np.float32).copy()
         if actions.shape != (self._model.action_horizon, self._raw_action_dim) or not np.isfinite(actions).all():

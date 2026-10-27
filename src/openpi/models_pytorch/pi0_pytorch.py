@@ -88,8 +88,12 @@ class PI0Pytorch(nn.Module):
             raise ValueError("Knowledge Insulation is implemented by the JAX Pi0/Pi0.5 path; use train.py")
         if getattr(config, "simulated_delay", None) is not None:
             raise ValueError("Training RTC supports JAX only")
+        if config.pad_to_square:
+            raise ValueError("pad_to_square is currently supported only by the JAX pi0/pi0.5 model")
         if config.image_resolution != (224, 224):
             raise ValueError("Custom image_resolution is currently supported only by the JAX pi0/pi0.5 model")
+        if config.image_resize_mode != "resize_with_pad":
+            raise ValueError("Custom image_resize_mode is currently supported only by the JAX pi0/pi0.5 model")
         if getattr(config, "image_token_merger", "none") != "none":
             raise ValueError("image_token_merger is currently supported only by the JAX pi0/pi0.5 model")
         self.config = config

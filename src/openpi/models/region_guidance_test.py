@@ -159,6 +159,17 @@ def test_patch_coverage_spatial_merge_averages_four_neighbours():
     np.testing.assert_allclose(rg.patch_coverage(mask, merge_size=2), [[0.4375]])
 
 
+def test_patch_coverage_pads_non_multiple_image_size():
+    mask = jnp.ones((1, 640, 640), dtype=jnp.float32)
+    coverage = rg.patch_coverage(mask)
+    assert coverage.shape == (1, 46 * 46)
+    coverage = np.asarray(coverage).reshape(46, 46)
+    np.testing.assert_array_equal(coverage[:45, :45], 1.0)
+    np.testing.assert_allclose(coverage[45, :45], 10 / 14)
+    np.testing.assert_allclose(coverage[:45, 45], 10 / 14)
+    np.testing.assert_allclose(coverage[45, 45], (10 / 14) ** 2)
+
+
 @pytest.fixture
 def small_backbones(monkeypatch):
     original_siglip = siglip.Module

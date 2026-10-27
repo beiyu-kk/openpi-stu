@@ -9,27 +9,76 @@ import orbax.checkpoint as ocp
 import pytest
 
 from openpi.models import gemma
+from openpi.models import gemma_fast
 from openpi.models import model as _model
 from openpi.models import pi0_config
+from openpi.models import pi0_fast
 from openpi.models import siglip
 from openpi.shared import nnx_utils
 from openpi.training import weight_loaders
 
 
-@pytest.mark.parametrize("size", [224, 336, 448])
+@pytest.mark.parametrize("size", [224, 336, 448, 640])
 def test_image_specs_and_siglip_parameter_shape(size):
     config = pi0_config.Pi0Config(pi05=True, image_resolution=(size, size))
     obs, _ = config.inputs_spec(batch_size=2)
     assert all(image.shape == (2, size, size, 3) for image in obs.images.values())
     model = nnx.eval_shape(config.create, jax.random.key(0))
     params = nnx.state(model).to_pure_dict()
-    assert params["PaliGemma"]["img"]["pos_embedding"].shape == (1, (size // 14) ** 2, 1152)
+    patch_side = (size + 13) // 14
+    assert params["PaliGemma"]["img"]["pos_embedding"].shape == (1, patch_side**2, 1152)
 
 
-@pytest.mark.parametrize("resolution", [(0, 0), (-224, -224), (225, 225), (224, 448), (224,), (224.0, 224.0)])
+@pytest.mark.parametrize("resolution", [(0, 0), (-224, -224), (224, 448), (224,), (224.0, 224.0)])
 def test_invalid_image_resolution(resolution):
     with pytest.raises(ValueError, match="image_resolution"):
         pi0_config.Pi0Config(image_resolution=resolution)
+
+
+def test_image_resolution_can_be_non_multiple_of_siglip_patch_size():
+    config = pi0_config.Pi0Config(image_resolution=(640, 640))
+    assert config.image_resolution == (640, 640)
+
+
+def test_pad_only_canvas_can_have_an_odd_patch_grid_without_merging():
+    config = pi0_config.Pi0Config(image_resolution=(320, 320), image_resize_mode="pad_only")
+    shaped = nnx.eval_shape(config.create, jax.random.key(0))
+    assert shaped.image_tokens_per_camera == 23 * 23
+    assert nnx.state(shaped).to_pure_dict()["PaliGemma"]["img"]["pos_embedding"].shape[1] == 23 * 23
+    with pytest.raises(ValueError, match="patch grid"):
+        dataclasses.replace(config, image_token_merger="spatial_2x2")
+
+
+def test_pad_only_model_preprocessing_preserves_image_pixels():
+    config = pi0_config.Pi0Config(image_resolution=(640, 640), image_resize_mode="pad_only")
+    observation = config.fake_obs()
+    image = jnp.arange(480 * 640 * 3, dtype=jnp.float32).reshape(1, 480, 640, 3)
+    image = image / image.max() * 2 - 1
+    observation = dataclasses.replace(observation, images=dict.fromkeys(observation.images, image))
+
+    processed = _model.preprocess_observation(
+        None, observation, image_resolution=config.image_resolution, image_resize_mode=config.image_resize_mode
+    )
+
+    assert processed.images["base_0_rgb"].shape == (1, 640, 640, 3)
+    np.testing.assert_array_equal(processed.images["base_0_rgb"][:, 80:560], image)
+
+
+def test_pad_only_training_keeps_region_geometry():
+    config = pi0_config.Pi0Config(image_resolution=(28, 28), image_resize_mode="pad_only")
+    obs = config.fake_obs()
+    pixels = jnp.linspace(-1, 1, 12 * 20 * 3).reshape(1, 12, 20, 3)
+    region = jnp.zeros((1, 12, 20), dtype=jnp.float32).at[:, 2:9, 3:10].set(1)
+    obs = dataclasses.replace(
+        obs, images=dict.fromkeys(obs.images, pixels), region_masks=dict.fromkeys(obs.images, region)
+    )
+    processed = _model.preprocess_observation(
+        jax.random.key(0), obs, train=True, image_resolution=(28, 28), image_resize_mode="pad_only"
+    )
+    expected = np.zeros((1, 28, 28), dtype=np.float32)
+    expected[:, 8:20, 4:24] = region
+    for mask in processed.region_masks.values():
+        np.testing.assert_array_equal(mask, expected)
 
 
 @pytest.fixture
@@ -47,6 +96,106 @@ def small_backbones(monkeypatch):
         "get_config",
         lambda _: gemma.Config(width=32, depth=1, mlp_dim=64, num_heads=2, num_kv_heads=1, head_dim=16),
     )
+
+
+@pytest.mark.parametrize("family", ["pi0", "pi05", "pi0_fast"])
+def test_dynamic_model_trains_and_decodes_multiple_sizes_with_fixed_parameters(small_backbones, monkeypatch, family):
+    options = {
+        "image_resolution": (28, 28),
+        "pad_to_square": True,
+        "action_horizon": 2,
+        "max_token_len": 4,
+        "dtype": "float32",
+    }
+    if family == "pi0_fast":
+        original = gemma_fast.get_config
+
+        def tiny_fast(variant):
+            cfg = original(variant)
+            cfg.update(
+                {
+                    "width": 32,
+                    "depth": 1,
+                    "mlp_dim": 64,
+                    "num_heads": 2,
+                    "num_kv_heads": 1,
+                    "head_dim": 16,
+                    "vocab_size": 32,
+                }
+            )
+            return cfg
+
+        monkeypatch.setattr(gemma_fast, "get_config", tiny_fast)
+        config = pi0_fast.Pi0FASTConfig(**options)
+    else:
+        config = pi0_config.Pi0Config(pi05=family == "pi05", **options)
+    model = config.create(jax.random.key(0))
+    if family == "pi0_fast":
+        params = nnx.state(model)
+        embedding = params["PaliGemma"]["llm"]["embedder"]["input_embedding"]
+        embedding.value = jax.random.normal(jax.random.key(1), embedding.value.shape) * 0.02
+        nnx.update(model, params)
+    optimizer = nnx.Optimizer(model, optax.adam(1e-3))
+    initial_shapes = jax.tree.map(lambda x: x.shape, nnx.state(model).to_pure_dict())
+
+    @nnx.jit
+    def step(current, optimizer, obs):
+        loss, grads = nnx.value_and_grad(
+            lambda current: jnp.mean(current.compute_loss(jax.random.key(2), obs, config.fake_act(), train=True))
+        )(current)
+        optimizer.update(grads)
+        return loss, grads.to_pure_dict()["PaliGemma"]["img"]["pos_embedding"]
+
+    sample = nnx_utils.module_jit(
+        model.sample_actions, **({"static_argnames": ("max_decoding_steps",)} if family == "pi0_fast" else {})
+    )
+    position_gradient = 0.0
+    for side in (28, 42):
+        obs = config.fake_obs()
+        images = {
+            key: jax.random.uniform(jax.random.key(i), (1, side + i * 7, side + i * 7, 3), minval=-1, maxval=1)
+            for i, key in enumerate(obs.images)
+        }
+        obs = dataclasses.replace(
+            obs,
+            images=images,
+            tokenized_prompt=jnp.array([[1, 2, 3, 4]], dtype=jnp.int32),
+            tokenized_prompt_mask=jnp.ones((1, 4), dtype=jnp.bool_),
+            token_ar_mask=jnp.array([[0, 0, 1, 1]], dtype=jnp.int32),
+            token_loss_mask=jnp.array([[False, False, True, True]]),
+        )
+        # Update repeatedly to open the initially zero visual heads / adaRMS gates.
+        for _ in range(3):
+            loss, pos_grad = step(model, optimizer, obs)
+            assert np.isfinite(np.asarray(loss))
+            assert np.isfinite(np.asarray(pos_grad)).all()
+            position_gradient += float(jnp.linalg.norm(pos_grad))
+        prediction = sample(
+            jax.random.key(3), obs, **({"max_decoding_steps": 2} if family == "pi0_fast" else {"num_steps": 1})
+        )
+        assert prediction.shape == ((1, 2) if family == "pi0_fast" else (1, 2, 32))
+        assert np.isfinite(np.asarray(prediction)).all()
+        assert jax.tree.map(lambda x: x.shape, nnx.state(model).to_pure_dict()) == initial_shapes
+    assert position_gradient > 0
+
+
+def test_dynamic_training_only_pads_image_and_region_geometry():
+    config = pi0_config.Pi0Config(image_resolution=(28, 28), pad_to_square=True)
+    obs = config.fake_obs()
+    image = jnp.linspace(-1, 1, 30 * 43 * 3).reshape(1, 30, 43, 3)
+    region = jnp.zeros((1, 30, 43), jnp.float32).at[:, 2:9, 3:10].set(1)
+    obs = dataclasses.replace(
+        obs, images=dict.fromkeys(obs.images, image), region_masks=dict.fromkeys(obs.images, region)
+    )
+    result = _model.preprocess_observation(
+        jax.random.key(0), obs, train=True, image_resolution=(28, 28), pad_to_square=config.pad_to_square
+    )
+    expected_region = np.pad(np.asarray(region), ((0, 0), (6, 7), (0, 0)))
+    for mask in result.region_masks.values():
+        np.testing.assert_array_equal(mask, expected_region)
+    result = _model.preprocess_observation(None, obs, pad_to_square=config.pad_to_square)
+    for pixels in result.images.values():
+        np.testing.assert_array_equal(pixels[:, 6:36], image)
 
 
 @pytest.mark.parametrize("size", [224, 336, 448])
@@ -165,7 +314,8 @@ def test_224_weights_to_configured_model_checkpoint(small_backbones, tmp_path, s
     restored = target_config.load(_model.restore_params(tmp_path / "high_res"))
     obs = target_config.fake_obs()
     encoded, masks, _ = nnx_utils.module_jit(restored.embed_prefix)(obs)
-    assert encoded.shape == (1, 3 * (size // 14) ** 2 + 4, 32)
+    patch_side = (size + 13) // 14
+    assert encoded.shape == (1, 3 * patch_side**2 + 4, 32)
     assert masks.shape == encoded.shape[:2]
     prediction = nnx_utils.module_jit(restored.sample_actions)(jax.random.key(1), obs, num_steps=1)
     assert prediction.shape == (1, 2, 32)
@@ -177,6 +327,8 @@ def test_pytorch_rejects_custom_resolution():
 
     with pytest.raises(ValueError, match="JAX"):
         PI0Pytorch(pi0_config.Pi0Config(image_resolution=(448, 448)))
+    with pytest.raises(ValueError, match="pad_to_square"):
+        PI0Pytorch(pi0_config.Pi0Config(pad_to_square=True))
 
 
 @pytest.mark.parametrize(("size", "tokens_per_image"), [(224, 64), (448, 256)])

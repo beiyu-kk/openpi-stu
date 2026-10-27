@@ -40,6 +40,12 @@ def test_resume_preserves_guidance_schedule_and_method(tmp_path):
     resized = dataclasses.replace(config, model=dataclasses.replace(config.model, image_resolution=(448, 448)))
     with pytest.raises(ValueError, match="resume settings differ"):
         train._record_region_guidance(resized, resuming=True)  # noqa: SLF001
+    pad_only = dataclasses.replace(config, model=dataclasses.replace(config.model, image_resize_mode="pad_only"))
+    with pytest.raises(ValueError, match="resume settings differ"):
+        train._record_region_guidance(pad_only, resuming=True)  # noqa: SLF001
+    dynamic = dataclasses.replace(config, model=dataclasses.replace(config.model, pad_to_square=True))
+    with pytest.raises(ValueError, match="resume settings differ"):
+        train._record_region_guidance(dynamic, resuming=True)  # noqa: SLF001
     with pytest.raises(ValueError, match="same guidance options"):
         train._record_region_guidance(dataclasses.replace(config, model=base.model), resuming=True)  # noqa: SLF001
 
@@ -61,6 +67,8 @@ def test_old_action_only_guidance_metadata_remains_resumable(tmp_path):
     path = tmp_path / "region_guidance.json"
     saved = json.loads(path.read_text())
     saved["guidance"].pop("query_types")
+    saved.pop("image_resize_mode")
+    saved.pop("pad_to_square")
     path.write_text(json.dumps(saved))
     train._record_region_guidance(config, resuming=True)  # noqa: SLF001
 

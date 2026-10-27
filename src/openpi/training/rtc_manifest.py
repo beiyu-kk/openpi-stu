@@ -32,7 +32,7 @@ def source_digest():
     root = pathlib.Path(__file__).resolve().parents[3]
     files = [root / "scripts/train.py", root / "scripts/train_piper.py", root / "scripts/compute_norm_stats.py"]
     for folder in ("src/openpi/training", "src/openpi/models", "src/openpi/policies"):
-        files.extend((root / folder).glob("*.py"))
+        files.extend((root / folder).rglob("*.py"))
     files.append(root / "src/openpi/transforms.py")
     digest = hashlib.sha256()
     for file in sorted(p for p in files if not p.name.endswith("_test.py") and p.name != "conftest.py"):
@@ -41,12 +41,23 @@ def source_digest():
     return digest.hexdigest()
 
 
-def model_values(values):
+def image_values(values):
+    """Read current image settings and migrate the previous dynamic-mode spelling."""
     values = dict(values)
+    mode = values.setdefault("image_resize_mode", "resize_with_pad")
+    values.setdefault("pad_to_square", mode == "pad_to_square")
+    if mode == "pad_to_square":
+        values["image_resize_mode"] = "resize_with_pad"
+    return values
+
+
+def model_values(values, *, model_type="pi05"):
+    values = image_values(values)
     # These fields were added after the original RTC manifests. Their absence
     # means the pre-Knowledge-Insulation continuous-only behavior.
-    values.setdefault("knowledge_insulation", False)
-    values.setdefault("discrete_action_loss_weight", 1.0)
+    if model_type != "pi0_fast":
+        values.setdefault("knowledge_insulation", False)
+        values.setdefault("discrete_action_loss_weight", 1.0)
     values["image_resolution"] = tuple(values["image_resolution"])
     if values.get("image_token_camera_keys") is not None:
         values["image_token_camera_keys"] = tuple(values["image_token_camera_keys"])
@@ -116,6 +127,7 @@ def validate_norm_stats(config, data_config):
 
 
 def build(config, data_config):
+    is_fast = config.model.model_type.value == "pi0_fast"
     if data_config.repo_id != "fake":
         validate_norm_stats(config, data_config)
         from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
@@ -132,6 +144,7 @@ def build(config, data_config):
             "source_sha256": source_digest(),
             "training_rtc": dataclasses.asdict(config.training_rtc),
             "model": dataclasses.asdict(config.model),
+            **({"model_type": "pi0_fast", "rtc_objective": "fast_prefix_suffix_v1"} if is_fast else {}),
             "optimizer": {"type": type(config.optimizer).__name__, **dataclasses.asdict(config.optimizer)},
             "lr_schedule": {"type": type(config.lr_schedule).__name__, **dataclasses.asdict(config.lr_schedule)},
             "base_checkpoint": dataclasses.asdict(config.weight_loader),
@@ -148,7 +161,13 @@ def build(config, data_config):
             "norm_stats_sha256": stats_digest(data_config.norm_stats or {}),
             "train_episodes": train,
             "validation_episodes": validation,
-            "freeze_strategy": "full" if config.training_rtc.finetune_mode == "full" else "action_lora_adarms_heads",
+            "freeze_strategy": (
+                "full"
+                if config.training_rtc.finetune_mode == "full"
+                else "fast_vlm_lora"
+                if is_fast
+                else "action_lora_adarms_heads"
+            ),
         }
     )
 
@@ -169,6 +188,7 @@ def prepare_resume(config):
             raise ValueError("Cannot resume an ordinary checkpoint as RTC; start a new experiment")
         return config
     previous = json.loads(path.read_text())
+    _validate_model_objective(config, previous)
     if previous["training_rtc"] != json_values(dataclasses.asdict(config.training_rtc)):
         raise ValueError("RTC resume settings differ from the saved experiment")
     return dataclasses.replace(
@@ -182,8 +202,10 @@ def record(config, manifest, *, resuming):
         if not path.exists():
             raise ValueError("RTC resume configuration, data, or normalization differs from the saved experiment")
         saved = json.loads(path.read_text())
-        saved.setdefault("model", {}).setdefault("knowledge_insulation", False)
-        saved["model"].setdefault("discrete_action_loss_weight", 1.0)
+        if saved.get("model_type", "pi05") != "pi0_fast":
+            saved.setdefault("model", {}).setdefault("knowledge_insulation", False)
+            saved["model"].setdefault("discrete_action_loss_weight", 1.0)
+        saved["model"] = image_values(saved["model"])
         # RTC resume records written before query scopes became configurable
         # omitted this field; those runs were action-query-only by definition.
         guidance = saved.get("model", {}).get("region_guidance")
@@ -209,10 +231,20 @@ def read(checkpoint_dir):
     return manifest
 
 
+def _validate_model_objective(config, manifest):
+    model_type = manifest.get("model_type", "pi05")
+    if config.model.model_type.value != model_type:
+        raise ValueError("RTC checkpoint model type does not match the selected training config")
+    if model_type == "pi0_fast" and manifest.get("rtc_objective") != "fast_prefix_suffix_v1":
+        raise ValueError("Unsupported FAST RTC tokenization objective")
+
+
 def restore_config(config, manifest, checkpoint_dir):
     from openpi.training import config as configs
 
-    model = dataclasses.replace(config.model, **model_values(manifest["model"]))
+    _validate_model_objective(config, manifest)
+    model_type = manifest.get("model_type", "pi05")
+    model = dataclasses.replace(config.model, **model_values(manifest["model"], model_type=model_type))
     assets_dir = str(pathlib.Path(checkpoint_dir) / "assets")
     asset_id = manifest["asset_id"]
     data = dataclasses.replace(

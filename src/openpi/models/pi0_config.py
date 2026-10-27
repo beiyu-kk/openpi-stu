@@ -22,8 +22,12 @@ class Pi0Config(_model.BaseModelConfig):
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
     action_expert_variant: _gemma.Variant = "gemma_300m"
-    # Square input resolution for the JAX SigLIP encoder; each patch is 14x14.
+    # Fixed input size, or position embedding reference size when pad_to_square=True.
     image_resolution: tuple[int, int] = (224, 224)
+    # True: pad each image to its longest side without resizing; allow dynamic sizes.
+    pad_to_square: bool = False
+    # Fixed-canvas processing used only when pad_to_square=False.
+    image_resize_mode: Literal["resize_with_pad", "pad_only"] = "resize_with_pad"
     # Optional Qwen-style spatial reduction after SigLIP.  ``none`` preserves
     # the original image-token sequence and all existing checkpoints.
     image_token_merger: Literal["none", "spatial_2x2"] = "none"
@@ -89,18 +93,26 @@ class Pi0Config(_model.BaseModelConfig):
             raise ValueError("knowledge_insulation requires a positive discrete_action_loss_weight")
         if (
             len(self.image_resolution) != 2
-            or any(type(size) is not int or size <= 0 or size % 14 != 0 for size in self.image_resolution)
+            or any(type(size) is not int or size <= 0 for size in self.image_resolution)
             or self.image_resolution[0] != self.image_resolution[1]
         ):
-            raise ValueError("image_resolution must be square with positive dimensions divisible by 14")
+            raise ValueError("image_resolution must be square with positive dimensions")
+        if type(self.pad_to_square) is not bool:
+            raise ValueError("pad_to_square must be a bool")
+        if self.image_resize_mode not in ("resize_with_pad", "pad_only"):
+            raise ValueError(
+                "image_resize_mode must be 'resize_with_pad' or 'pad_only'; use pad_to_square=True for dynamic sizes"
+            )
         if self.image_token_merger not in ("none", "spatial_2x2"):
             raise ValueError("image_token_merger must be 'none' or 'spatial_2x2'")
         if type(self.image_token_merge_size) is not int or self.image_token_merge_size < 1:
             raise ValueError("image_token_merge_size must be a positive integer")
         if self.image_token_merger == "spatial_2x2" and self.image_token_merge_size != 2:
             raise ValueError("spatial_2x2 requires image_token_merge_size=2")
-        patch_side = self.image_resolution[0] // 14
-        if patch_side % self.image_token_merge_size:
+        if self.pad_to_square and self.image_token_merger != "none":
+            raise ValueError("pad_to_square currently requires image_token_merger='none'")
+        patch_side = (self.image_resolution[0] + 13) // 14
+        if self.image_token_merger == "spatial_2x2" and patch_side % self.image_token_merge_size:
             raise ValueError("image patch grid must be divisible by image_token_merge_size")
         if self.image_token_merger == "none" and self.image_token_merge_size != 2:
             raise ValueError("image_token_merge_size is only configurable when image_token_merger='spatial_2x2'")

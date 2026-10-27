@@ -23,14 +23,12 @@ print(maybe_download("gs://openpi-assets/checkpoints/pi05_base"))
 
 全量微调和 LoRA 微调的动作块长度统一为 30 帧；当前数据集为 30 FPS，因此每个动作块覆盖约 1 秒。
 
-`--config` 直接选择 `src/openpi/training/config.py` 中的 TrainConfig。图像尺寸通过 `--image-size` 独立设置，必须为 14 的正整数倍，例如 224、336、448。两个 Piper 配置默认均为 224；不再使用带 `_336`、`_448` 后缀的配置名。恢复训练时保持尺寸一致，部署时传对应的 `--policy.image-size`。已有 448 分辨率的 LoRA 实验需要显式传 `--image-size 448`。
 
 全量微调：
 
 ```bash
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train_piper.py \
     --config pi05_piper_full_finetune \
-    --image-size 224 \
     --dataset-dir /path/to/lerobot/dataset \
     --dataset-repo-id piper_dataset_name \
     --base-model-dir /path/to/pi05_base \
@@ -46,8 +44,7 @@ LoRA 微调：
 
 ```bash
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train_piper.py \
-    --config pi05_piper_lora_finetune \
-    --image-size 448 \
+    --config=pi05_piper_lora_finetune_image448 \
     --dataset-dir /path/to/lerobot/dataset \
     --dataset-repo-id piper_dataset_name \
     --base-model-dir /path/to/pi05_base \
@@ -60,8 +57,7 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train_piper.py \
 
 ```bash
 uv run scripts/train_piper.py \
-    --config pi05_piper_lora_finetune \
-    --image-size 448 \
+    --config=pi05_piper_lora_finetune_image448 \
     --dataset-dir /path/to/lerobot/dataset \
     --dataset-repo-id piper_dataset_name \
     --base-model-dir /path/to/pi05_base \

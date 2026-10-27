@@ -1,6 +1,7 @@
 import copy
 import dataclasses
 
+import jax
 import numpy as np
 import pytest
 
@@ -87,6 +88,34 @@ def test_embedded_annotations_create_right_wrist_mask(annotated_data):
     assert guided["region_masks"]["right_wrist_0_rgb"].sum() > 0
 
 
+def test_pad_only_annotations_follow_image_offsets(annotated_data):
+    sample, cfg = annotated_data
+    cfg = dataclasses.replace(
+        cfg,
+        region_annotations_embedded=True,
+        model_transforms=transforms.Group(inputs=[transforms.ResizeImages(84, 84, mode="pad_only")]),
+    )
+    annotated = data_loader.transform_dataset([copy.deepcopy(sample)], cfg)[0]
+    expected = np.zeros((84, 84), dtype=np.float32)
+    expected[18:66, 10:74] = ra.boxes_to_mask([sample[ra.BOOK_BBOX_KEY]], 48, 64)
+    np.testing.assert_array_equal(annotated["region_masks"]["right_wrist_0_rgb"], expected)
+    assert annotated["image"]["right_wrist_0_rgb"].shape == (84, 84, 3)
+
+
+def test_dynamic_square_annotations_follow_native_image_offsets(annotated_data):
+    sample, cfg = annotated_data
+    cfg = dataclasses.replace(
+        cfg,
+        region_annotations_embedded=True,
+        model_transforms=transforms.Group(inputs=[transforms.ResizeImages(28, 28, mode="pad_to_square")]),
+    )
+    annotated = data_loader.transform_dataset([copy.deepcopy(sample)], cfg)[0]
+    expected = np.zeros((64, 64), dtype=np.float32)
+    expected[8:56] = ra.boxes_to_mask([sample[ra.BOOK_BBOX_KEY]], 48, 64)
+    np.testing.assert_array_equal(annotated["region_masks"]["right_wrist_0_rgb"], expected)
+    assert annotated["image"]["right_wrist_0_rgb"].shape == (64, 64, 3)
+
+
 def test_embedded_invalid_sentinel_disables_region(annotated_data):
     sample, cfg = annotated_data
     sample[ra.BOOK_BBOX_KEY] = np.full(4, -1, dtype=np.float32)
@@ -138,7 +167,13 @@ def test_guided_loader_with_spawn_workers(annotated_data):
         [copy.deepcopy(sample) for _ in range(4)],
         dataclasses.replace(cfg, region_annotations_embedded=True),
     )
-    loader = data_loader.TorchDataLoader(dataset, local_batch_size=1, num_batches=2, num_workers=2)
+    loader = data_loader.TorchDataLoader(
+        dataset,
+        local_batch_size=1,
+        num_batches=2,
+        num_workers=2,
+        sharding=jax.sharding.SingleDeviceSharding(jax.local_devices()[0]),
+    )
     batches = list(loader)
     assert len(batches) == 2
     for batch in batches:
@@ -150,8 +185,6 @@ def test_guided_loader_with_spawn_workers(annotated_data):
 def test_missing_embedded_fields_fail(annotated_data):
     sample, cfg = annotated_data
     del sample[ra.TITLE_BBOX_KEY]
-    annotated = data_loader.transform_dataset(
-        [sample], dataclasses.replace(cfg, region_annotations_embedded=True)
-    )
+    annotated = data_loader.transform_dataset([sample], dataclasses.replace(cfg, region_annotations_embedded=True))
     with pytest.raises(ValueError, match="Missing embedded annotation fields"):
         annotated[0]

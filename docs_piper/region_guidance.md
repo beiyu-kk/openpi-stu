@@ -20,8 +20,7 @@ ordinary LoRA config.
 
 ```bash
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run --no-sync scripts/train_piper.py \
-  --config pi05_piper_lora_finetune \
-  --image-size 448 \
+  --config=pi05_piper_lora_finetune_image448 \
   --dataset-dir /media/ubun/16T/Dataset/piper_eva_data/recognition/recognize_book_name/success/origin \
   --dataset-repo-id recognize_book_label_color_1_region_bias \
   --base-model-dir /media/ubun/16T/checkpoints/openpi/openpi-assets/checkpoints/pi05_base/params \
@@ -39,10 +38,8 @@ available GPU memory. Use the same batch size for the baseline comparison.
 
 For a baseline run, remove `--region-guidance` and use a different checkpoint
 directory and experiment name. All image, state, action, normalization and
-prompt transforms are the same. `--config` selects the TrainConfig; `--image-size`
-sets the square input resolution independently. Both Piper configs default to
-224. Replace former `_336`/`_448` config names with the base name and
-`--image-size 336`/`--image-size 448`.
+prompt transforms are unchanged. The selected TrainConfig fixes input resolution: use
+the base config for 224×224 and the `_image448` variant for 448×448.
 
 There is no sidecar or separate annotation path. Startup validates the embedded
 feature declarations, parquet column types, episode count, and total frame
@@ -138,15 +135,15 @@ alignment/integration work and are not enabled by this switch.
 
 ## Resume and Deployment
 
-Use the same launch options, including `--image-size`, plus `--resume` to continue a guided run. The output
+Use the same TrainConfig with `--resume` to continue a guided run. The output
 directory records `region_guidance.json`; resume checks the guidance settings,
 total training steps, input resolution and dataset paths. Changing the total
 steps would change the annealing schedule, so it is rejected. Start a separate
 run to change the method or schedule.
 
 No model parameters are added. Guided checkpoints can be loaded using the
-matching pi0.5 configuration and image size: for the example above, use
-`--policy.config=pi05_piper_lora_finetune --policy.image-size=448` when serving.
+matching pi0.5 configuration. For the example above, use
+`--policy.config=pi05_piper_lora_finetune_image448` when serving.
 `sample_actions` never applies the annotation bias and needs no annotation files.
 Likewise, `compute_loss(..., train=False)` measures the unguided model.
 

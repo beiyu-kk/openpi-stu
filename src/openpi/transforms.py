@@ -1,7 +1,7 @@
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
 import re
-from typing import Protocol, TypeAlias, TypeVar, runtime_checkable
+from typing import Literal, Protocol, TypeAlias, TypeVar, runtime_checkable
 
 import flax.traverse_util as traverse_util
 import jax
@@ -183,11 +183,50 @@ class Unnormalize(DataTransformFn):
 
 @dataclasses.dataclass(frozen=True)
 class ResizeImages(DataTransformFn):
+    """Fit images to the configured canvas, optionally without any resampling."""
+
     height: int
     width: int
+    mode: Literal["resize_with_pad", "pad_only", "pad_to_square"] = "resize_with_pad"
+
+    def __post_init__(self):
+        if self.mode not in ("resize_with_pad", "pad_only", "pad_to_square"):
+            raise ValueError(f"Unknown image resize mode: {self.mode}")
+        if self.mode == "pad_only" and (self.height <= 0 or self.height != self.width):
+            raise ValueError("pad_only requires a positive square canvas")
+
+    def _pad_only(self, image: np.ndarray) -> np.ndarray:
+        image = np.asarray(image)
+        cur_height, cur_width = image.shape[:2]
+        height, width = self.height, self.width
+        if self.mode == "pad_to_square":
+            height = width = max(cur_height, cur_width)
+        if cur_height > height or cur_width > width:
+            raise ValueError(
+                f"Image size {(cur_height, cur_width)} exceeds padding target {(height, width)}; "
+                "pad-only mode never resizes"
+            )
+        pad_h0, remainder_h = divmod(height - cur_height, 2)
+        pad_w0, remainder_w = divmod(width - cur_width, 2)
+        if image.dtype == np.uint8:
+            pad_value = 0
+        elif image.dtype == np.float32:
+            pad_value = -1.0
+        else:
+            raise ValueError(f"Unsupported image dtype for pad-only mode: {image.dtype}")
+        return np.pad(
+            image,
+            ((pad_h0, pad_h0 + remainder_h), (pad_w0, pad_w0 + remainder_w), (0, 0)),
+            constant_values=pad_value,
+        )
 
     def __call__(self, data: DataDict) -> DataDict:
-        data["image"] = {k: image_tools.resize_with_pad(v, self.height, self.width) for k, v in data["image"].items()}
+        if self.mode in ("pad_only", "pad_to_square"):
+            data["image"] = {k: self._pad_only(v) for k, v in data["image"].items()}
+        else:
+            data["image"] = {
+                k: image_tools.resize_with_pad(v, self.height, self.width) for k, v in data["image"].items()
+            }
         return data
 
 

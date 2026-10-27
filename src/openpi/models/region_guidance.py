@@ -108,8 +108,11 @@ def query_mask(
 def patch_coverage(masks, patch_size: int = 14, merge_size: int = 1):
     """Average pixel coverage, preserving the encoder's row-major patch order."""
     batch, height, width = masks.shape
-    if height % patch_size or width % patch_size:
-        raise ValueError("Region masks must have dimensions divisible by the image patch size")
+    pad_height = (-height) % patch_size
+    pad_width = (-width) % patch_size
+    if pad_height or pad_width:
+        masks = jnp.pad(masks, ((0, 0), (0, pad_height), (0, pad_width)))
+        height, width = masks.shape[1:]
     coverage = masks.reshape(batch, height // patch_size, patch_size, width // patch_size, patch_size).mean(axis=(2, 4))
     patch_height, patch_width = coverage.shape[1:]
     if type(merge_size) is not int or merge_size < 1:

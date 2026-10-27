@@ -88,7 +88,7 @@ class Observation(Generic[ArrayT]):
     """
 
     # Images, in [-1, 1] float32.
-    images: dict[str, at.Float[ArrayT, "*b h w c"]]
+    images: dict[str, at.Float[ArrayT, "*b _h _w c"]]
     # Image masks, with same keys as images.
     image_masks: dict[str, at.Bool[ArrayT, "*b"]]
     # Low-dimensional robot state.
@@ -105,12 +105,14 @@ class Observation(Generic[ArrayT]):
     token_ar_mask: at.Int[ArrayT, "*b l"] | None = None
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
+    # FAST RTC token sequences for each candidate delay: [batch, delay, length].
+    rtc_token_inputs: dict[str, ArrayT] | None = None
 
     # Episode padding for action windows; only used by training RTC.
     action_is_pad: at.Bool[ArrayT, "*b ah"] | None = None
 
     # Training-only region guidance metadata. These never enter deployed policy inputs.
-    region_masks: dict[str, at.Float[ArrayT, "*b h w"]] | None = None
+    region_masks: dict[str, at.Float[ArrayT, "*b _h _w"]] | None = None
     region_valid: dict[str, at.Bool[ArrayT, "*b"]] | None = None
 
     @classmethod
@@ -133,6 +135,7 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            rtc_token_inputs=data.get("rtc_token_inputs"),
             action_is_pad=data.get("action_is_pad"),
             region_masks=data.get("region_masks"),
             region_valid=data.get("region_valid"),
@@ -143,7 +146,7 @@ class Observation(Generic[ArrayT]):
         result = dataclasses.asdict(self)
         result["image"] = result.pop("images")
         result["image_mask"] = result.pop("image_masks")
-        for key in ("region_masks", "region_valid", "action_is_pad"):
+        for key in ("region_masks", "region_valid", "action_is_pad", "rtc_token_inputs"):
             if result[key] is None:
                 result.pop(key)
         return result
@@ -161,6 +164,8 @@ def preprocess_observation(
     train: bool = False,
     image_keys: Sequence[str] = IMAGE_KEYS,
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
+    pad_to_square: bool = False,
+    image_resize_mode: str = "resize_with_pad",
 ) -> Observation:
     """Preprocess the observations by performing image augmentations (if train=True), resizing (if necessary), and
     filling in a default image mask (if necessary).
@@ -168,6 +173,11 @@ def preprocess_observation(
 
     if not set(image_keys).issubset(observation.images):
         raise ValueError(f"images dict missing keys: expected {image_keys}, got {list(observation.images)}")
+    if image_resize_mode not in ("resize_with_pad", "pad_only"):
+        raise ValueError(f"Unknown image resize mode: {image_resize_mode}")
+    if pad_to_square:
+        image_resize_mode = "pad_to_square"
+    resize = image_tools.resize_with_pad if image_resize_mode == "resize_with_pad" else image_tools.pad_to_size
 
     batch_shape = observation.state.shape[:-1]
 
@@ -178,19 +188,24 @@ def preprocess_observation(
         region = None if out_regions is None else observation.region_masks[key]
         if region is not None and region.shape != image.shape[:-1]:
             raise ValueError(f"Region mask for {key} must match its image before augmentation")
-        if image.shape[1:3] != image_resolution:
-            logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
-            image = image_tools.resize_with_pad(image, *image_resolution)
+        target = image_resolution
+        if image_resize_mode == "pad_to_square":
+            side = max(image.shape[1:3])
+            target = (side, side)
+        if image.shape[1:3] != target:
+            logger.info(f"Processing image {key} from {image.shape[1:3]} to {target} ({image_resize_mode})")
+            image = resize(image, *target)
             if region is not None:
                 # The image helper pads float images with -1; masks require zero padding.
-                region = jnp.maximum(image_tools.resize_with_pad(region[..., None], *image_resolution)[..., 0], 0.0)
+                region = jnp.maximum(resize(region[..., None], *target)[..., 0], 0.0)
 
         if train:
             # Convert from [-1, 1] to [0, 1] for augmax.
             image = image / 2.0 + 0.5
 
             transforms = []
-            if "wrist" not in key:
+            # Pad-only keeps source geometry even during training; color jitter remains enabled.
+            if "wrist" not in key and image_resize_mode == "resize_with_pad":
                 height, width = image.shape[1:3]
                 transforms += [
                     augmax.RandomCrop(int(width * 0.95), int(height * 0.95)),
@@ -233,6 +248,7 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        rtc_token_inputs=observation.rtc_token_inputs,
         action_is_pad=observation.action_is_pad,
         region_masks=out_regions,
         region_valid=observation.region_valid,

@@ -52,6 +52,47 @@ def resize_with_pad(
     return padded_images
 
 
+@functools.partial(jax.jit, static_argnums=(1, 2))
+@at.typecheck
+def pad_to_size(
+    images: at.UInt8[at.Array, "*b h w c"] | at.Float[at.Array, "*b h w c"],
+    height: int,
+    width: int,
+) -> at.UInt8[at.Array, "*b {height} {width} c"] | at.Float[at.Array, "*b {height} {width} c"]:
+    """Center-pad images to a target size without scaling any source pixels.
+
+    Images larger than the target in either dimension are rejected.
+    """
+    if height <= 0 or width <= 0:
+        raise ValueError("Target image dimensions must be positive")
+    has_batch_dim = images.ndim == 4
+    if not has_batch_dim:
+        images = images[None]  # type: ignore
+    cur_height, cur_width = images.shape[1:3]
+    if cur_height > height or cur_width > width:
+        raise ValueError(
+            f"Image size {(cur_height, cur_width)} exceeds padding target {(height, width)}; pad-only mode never resizes"
+        )
+    pad_h0, remainder_h = divmod(height - cur_height, 2)
+    pad_h1 = pad_h0 + remainder_h
+    pad_w0, remainder_w = divmod(width - cur_width, 2)
+    pad_w1 = pad_w0 + remainder_w
+    if images.dtype == jnp.uint8:
+        pad_value = 0
+    elif images.dtype == jnp.float32:
+        pad_value = -1.0
+    else:
+        raise ValueError(f"Unsupported image dtype: {images.dtype}")
+    padded_images = jnp.pad(
+        images,
+        ((0, 0), (pad_h0, pad_h1), (pad_w0, pad_w1), (0, 0)),
+        constant_values=pad_value,
+    )
+    if not has_batch_dim:
+        padded_images = padded_images[0]
+    return padded_images
+
+
 def resize_with_pad_torch(
     images: torch.Tensor,
     height: int,

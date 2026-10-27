@@ -102,6 +102,8 @@ class PiperInputs(transforms.DataTransformFn):
             inputs["actions"] = np.asarray(data["actions"])
         if "action_is_pad" in data:
             inputs["action_is_pad"] = np.asarray(data["action_is_pad"], dtype=bool)
+        if "rtc_delay" in data:
+            inputs["rtc_delay"] = data["rtc_delay"]
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
         return inputs

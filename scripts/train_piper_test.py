@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from openpi import transforms
+from openpi.models import pi0_fast
 from openpi.training import config as _config
 from scripts import compute_norm_stats
 from scripts import train_piper
@@ -23,20 +24,33 @@ def test_resolve_base_params_path(tmp_path):
     )
 
 
-@pytest.mark.parametrize("config_name", ["pi05_piper_full_finetune", "pi05_piper_lora_finetune"])
-@pytest.mark.parametrize("image_size", [None, 224, 336, 448])
-def test_build_config_with_custom_paths(tmp_path, monkeypatch, config_name, image_size):
+@pytest.mark.parametrize(
+    "config_name",
+    [
+        "pi05_piper_full_finetune",
+        "pi05_piper_lora_finetune",
+        "pi0_fast_piper_full_finetune",
+        "pi0_fast_piper_full_finetune_image448",
+        "pi0_fast_piper_lora_finetune",
+        "pi0_fast_piper_lora_finetune_image448",
+        "pi0_fast_piper_full_finetune_image640_pad_only",
+        "pi05_piper_lora_finetune_image640_pad_only",
+        "pi0_fast_piper_full_finetune_pad_to_square",
+        "pi05_piper_lora_finetune_pad_to_square",
+    ],
+)
+def test_build_config_with_custom_paths(tmp_path, monkeypatch, config_name):
     dataset_dir = tmp_path / "dataset"
     (dataset_dir / "meta").mkdir(parents=True)
     (dataset_dir / "meta" / "info.json").write_text("{}")
     (dataset_dir / "data").mkdir()
-    params_dir = tmp_path / "pi05_base" / "params"
+    base_model_name = "pi0_fast_base" if config_name.startswith("pi0_fast") else "pi05_base"
+    params_dir = tmp_path / base_model_name / "params"
     params_dir.mkdir(parents=True)
     norm_stats_dir = tmp_path / "normalization"
     checkpoint_dir = tmp_path / "output"
     args = argparse.Namespace(
         config=config_name,
-        image_size=image_size,
         dataset_dir=str(dataset_dir),
         dataset_repo_id="local/piper",
         base_model_dir=str(params_dir.parent),
@@ -56,17 +70,20 @@ def test_build_config_with_custom_paths(tmp_path, monkeypatch, config_name, imag
     config = train_piper._build_config(args)  # noqa: SLF001
     data_config = config.data.create_base_config(config.assets_dirs, config.model)
     base = _config.get_config(config_name)
-    expected_size = image_size or 224
+    expected_size = 640 if "image640" in config_name else 448 if "image448" in config_name else 224
 
     assert config.name == base.name
-    assert config.batch_size == (16 if "lora" in config_name else 32)
+    expected_batch_size = 16 if "lora" in config_name or config_name.startswith("pi0_fast") else 32
+    assert config.batch_size == expected_batch_size
     assert config.model.image_resolution == (expected_size, expected_size)
-    assert base.model.image_resolution == (224, 224)
+    assert base.model.image_resolution == (expected_size, expected_size)
     assert config.model.paligemma_variant == base.model.paligemma_variant
     assert config.freeze_filter == base.freeze_filter
     assert config.optimizer is base.optimizer
-    if image_size is None:
-        assert config.model is base.model
+    assert config.model is base.model
+    expected_mode = "pad_only" if config_name.endswith("pad_only") else "resize_with_pad"
+    assert config.model.pad_to_square == config_name.endswith("pad_to_square")
+    assert config.model.image_resize_mode == expected_mode
     assert config.weight_loader.resize_siglip_posemb
     assert config.weight_loader.params_path == str(params_dir)
     assert config.checkpoint_dir == checkpoint_dir
@@ -75,11 +92,15 @@ def test_build_config_with_custom_paths(tmp_path, monkeypatch, config_name, imag
     assert compute_norm_stats.get_norm_stats_dir(config, data_config) == norm_stats_dir
 
     monkeypatch.setattr(_config._tokenizer, "PaligemmaTokenizer", lambda *_: None)  # noqa: SLF001
+    monkeypatch.setattr(_config._tokenizer, "FASTTokenizer", lambda *_args, **_kwargs: object())  # noqa: SLF001
     group = _config.ModelTransformFactory()(config.model)
     resize = next(transform for transform in group.inputs if isinstance(transform, transforms.ResizeImages))
     image = np.full((423, 628, 3), 127, dtype=np.uint8)
     result = resize({"image": {"base_0_rgb": image}})
-    assert result["image"]["base_0_rgb"].shape == (expected_size, expected_size, 3)
+    output_size = 628 if config.model.pad_to_square else expected_size
+    assert result["image"]["base_0_rgb"].shape == (output_size, output_size, 3)
+    if config_name.startswith("pi0_fast"):
+        assert isinstance(config.model, pi0_fast.Pi0FASTConfig)
 
 
 @pytest.mark.parametrize(
@@ -98,8 +119,7 @@ def test_dataset_arguments_are_required(monkeypatch, capsys, provided_argument, 
     assert missing_argument in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("image_size", ["0", "-14", "225", "abc"])
-def test_invalid_image_size_is_rejected(monkeypatch, capsys, image_size):
+def test_legacy_image_size_argument_is_rejected(monkeypatch, capsys):
     monkeypatch.setattr(
         sys,
         "argv",
@@ -112,7 +132,7 @@ def test_invalid_image_size_is_rejected(monkeypatch, capsys, image_size):
             "--exp-name",
             "test",
             "--image-size",
-            image_size,
+            "448",
         ],
     )
     with pytest.raises(SystemExit, match="2"):
@@ -164,20 +184,18 @@ def test_launcher_uses_registered_train_config_defaults(tmp_path, monkeypatch):
     assert config.model is registered.model
 
 
-@pytest.mark.parametrize("size", [224, 336, 448])
-def test_launcher_preserves_resolution_edited_in_train_config(tmp_path, monkeypatch, size):
+def test_launcher_uses_registered_448_resolution(tmp_path, monkeypatch):
     dataset_dir = tmp_path / "dataset"
     (dataset_dir / "meta").mkdir(parents=True)
     (dataset_dir / "meta" / "info.json").write_text("{}")
     (dataset_dir / "data").mkdir()
-    base = _config.get_config("pi05_piper_full_finetune")
-    configured = dataclasses.replace(base, model=dataclasses.replace(base.model, image_resolution=(size, size)))
-    monkeypatch.setattr(train_piper._config, "get_config", lambda _: configured)  # noqa: SLF001
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "train_piper.py",
+            "--config",
+            "pi0_fast_piper_full_finetune_image448",
             "--dataset-dir",
             str(dataset_dir),
             "--dataset-repo-id",
@@ -189,14 +207,12 @@ def test_launcher_preserves_resolution_edited_in_train_config(tmp_path, monkeypa
         ],
     )
     config = train_piper._build_config(train_piper._parse_args())  # noqa: SLF001
-    assert config.model is configured.model
-    assert config.model.image_resolution == (size, size)
-    assert config.weight_loader.resize_siglip_posemb == configured.weight_loader.resize_siglip_posemb
+    assert config.model.image_resolution == (448, 448)
+    assert config.weight_loader.resize_siglip_posemb
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("image_size", [224, 336, 448])
-def test_region_guidance_is_opt_in(tmp_path, monkeypatch, enabled, image_size):
+def test_region_guidance_is_opt_in(tmp_path, monkeypatch, enabled):
     dataset_dir = tmp_path / "dataset"
     (dataset_dir / "meta").mkdir(parents=True)
     (dataset_dir / "data").mkdir()
@@ -212,8 +228,6 @@ def test_region_guidance_is_opt_in(tmp_path, monkeypatch, enabled, image_size):
         "train_piper.py",
         "--config",
         "pi05_piper_lora_finetune",
-        "--image-size",
-        str(image_size),
         "--dataset-dir",
         str(dataset_dir),
         "--dataset-repo-id",
@@ -228,7 +242,7 @@ def test_region_guidance_is_opt_in(tmp_path, monkeypatch, enabled, image_size):
     monkeypatch.setattr(sys, "argv", argv)
     base = _config.get_config("pi05_piper_lora_finetune")
     config = train_piper._build_config(train_piper._parse_args())  # noqa: SLF001
-    assert config.model.image_resolution == (image_size, image_size)
+    assert config.model.image_resolution == (224, 224)
     assert base.model.image_resolution == (224, 224)
     assert config.freeze_filter == base.freeze_filter
     assert config.data.base_config.prompt_from_task

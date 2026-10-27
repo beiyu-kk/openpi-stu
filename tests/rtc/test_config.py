@@ -1,4 +1,5 @@
 import dataclasses
+import json
 import sys
 
 import flax.nnx as nnx
@@ -8,6 +9,7 @@ import pytest
 
 from openpi.training import config
 from openpi.training import optimizer
+from openpi.training import rtc_manifest
 from openpi.training import weight_loaders
 from openpi.training.rtc_config import TrainingRTCConfig
 from scripts import train_piper
@@ -34,8 +36,6 @@ def test_launcher_selects_rtc_and_preserves_baseline(tmp_path, monkeypatch, mode
             "local/piper",
             "--exp-name",
             "rtc",
-            "--image-size",
-            "336",
         ],
     )
     resolved = train_piper._build_config(train_piper._parse_args())  # noqa: SLF001
@@ -43,7 +43,7 @@ def test_launcher_selects_rtc_and_preserves_baseline(tmp_path, monkeypatch, mode
     assert base.model.simulated_delay is None
     assert resolved.training_rtc.finetune_mode == mode
     assert resolved.model.simulated_delay == 5
-    assert resolved.model.image_resolution == (336, 336)
+    assert resolved.model.image_resolution == (224, 224)
     assert resolved.ema_decay is None
     assert isinstance(resolved.weight_loader, weight_loaders.RTCCheckpointWeightLoader)
     assert resolved.data.norm_stats_dir.startswith(str(dataset / "rtc_norm_stats"))
@@ -114,3 +114,40 @@ def test_checkpoint_inspection_preserves_adapters(tmp_path, key):
 def test_invalid_rtc_settings(kwargs):
     with pytest.raises(ValueError, match="RTC"):
         TrainingRTCConfig(**kwargs)
+
+
+def test_legacy_manifest_defaults_to_resize_with_pad(tmp_path):
+    cfg = dataclasses.replace(config.get_config("pi05_piper_full_finetune_rtc"), checkpoint_dir_override=str(tmp_path))
+    legacy_model = dataclasses.asdict(cfg.model)
+    legacy_model.pop("image_resize_mode")
+    legacy_model.pop("pad_to_square")
+    assert rtc_manifest.model_values(legacy_model)["image_resize_mode"] == "resize_with_pad"
+    assert rtc_manifest.model_values(legacy_model)["pad_to_square"] is False
+    legacy_record = {"model": legacy_model}
+    (tmp_path / "training_rtc.json").write_text(json.dumps(legacy_record))
+    current = rtc_manifest.json_values({"model": dataclasses.asdict(cfg.model)})
+    rtc_manifest.record(cfg, current, resuming=True)
+    current["model"]["image_resize_mode"] = "pad_only"
+    with pytest.raises(ValueError, match="differs"):
+        rtc_manifest.record(cfg, current, resuming=True)
+
+
+@pytest.mark.parametrize("family", ["pi05", "pi0_fast"])
+def test_legacy_dynamic_manifest_restores_model_switch(tmp_path, family):
+    cfg = dataclasses.replace(
+        config.get_config(f"{family}_piper_full_finetune_rtc_pad_to_square"),
+        checkpoint_dir_override=str(tmp_path),
+    )
+    legacy_model = dataclasses.asdict(cfg.model)
+    legacy_model.pop("pad_to_square")
+    legacy_model["image_resize_mode"] = "pad_to_square"
+    restored = dataclasses.replace(cfg.model, **rtc_manifest.model_values(legacy_model, model_type=family))
+    assert restored.pad_to_square is True
+    assert restored.image_resize_mode == "resize_with_pad"
+    assert restored == cfg.model
+    (tmp_path / "training_rtc.json").write_text(json.dumps({"model_type": family, "model": legacy_model}))
+    current = rtc_manifest.json_values({"model_type": family, "model": dataclasses.asdict(cfg.model)})
+    rtc_manifest.record(cfg, current, resuming=True)
+    current["model"]["pad_to_square"] = False
+    with pytest.raises(ValueError, match="differs"):
+        rtc_manifest.record(cfg, current, resuming=True)

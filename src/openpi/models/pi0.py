@@ -75,10 +75,12 @@ class Pi0(_model.BaseModel):
         self.rtc_loss_reduction = config.rtc_loss_reduction
         self.rtc_time_distribution = config.rtc_time_distribution
         self.image_resolution = config.image_resolution
+        self.pad_to_square = config.pad_to_square
+        self.image_resize_mode = config.image_resize_mode
         self.image_token_merger_mode = config.image_token_merger
         self.image_token_merge_size = config.image_token_merge_size if config.image_token_merger == "spatial_2x2" else 1
         self.image_token_camera_keys = config.image_token_camera_keys
-        patch_side = self.image_resolution[0] // 14
+        patch_side = (self.image_resolution[0] + 13) // 14
         self.image_tokens_per_camera = (patch_side // self.image_token_merge_size) ** 2
         self.image_token_count = len(self.image_token_camera_keys) * self.image_tokens_per_camera
         self.region_guidance = config.region_guidance
@@ -104,6 +106,11 @@ class Pi0(_model.BaseModel):
                 pool_type="none",
                 scan=True,
                 dtype_mm=config.dtype,
+                **(
+                    {"posemb_grid": tuple((side + 13) // 14 for side in config.image_resolution)}
+                    if config.pad_to_square
+                    else {}
+                ),
             )
         )
         img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
@@ -140,7 +147,7 @@ class Pi0(_model.BaseModel):
         for name in self.image_token_camera_keys:
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
             if self.image_token_merger is not None:
-                patch_side = self.image_resolution[0] // 14
+                patch_side = (self.image_resolution[0] + 13) // 14
                 image_tokens = self.image_token_merger(image_tokens, patch_side, patch_side)
 
             tokens.append(image_tokens)
@@ -250,7 +257,12 @@ class Pi0(_model.BaseModel):
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         delay_rng = jax.random.fold_in(rng, 732)
         observation = _model.preprocess_observation(
-            preprocess_rng, observation, train=train, image_resolution=self.image_resolution
+            preprocess_rng,
+            observation,
+            train=train,
+            image_resolution=self.image_resolution,
+            pad_to_square=self.pad_to_square,
+            image_resize_mode=self.image_resize_mode,
         )
         batch_shape = actions.shape[:-2]
         if noise is None:
@@ -304,15 +316,16 @@ class Pi0(_model.BaseModel):
             )
             key_bias = jnp.pad(image_bias, ((0, 0), (0, input_mask.shape[1] - image_bias.shape[1])))
             prefix_length = prefix_tokens.shape[1]
-            if prefix_length < self.image_token_count:
+            image_token_count = image_bias.shape[1]
+            if prefix_length < image_token_count:
                 raise ValueError(
                     f"Prefix length {prefix_length} is shorter than the configured image token count "
-                    f"{self.image_token_count}"
+                    f"{image_token_count}"
                 )
             region_queries = _region_guidance.query_mask(
                 input_mask.shape[1],
-                image_range=(0, self.image_token_count),
-                prompt_range=(self.image_token_count, prefix_length),
+                image_range=(0, image_token_count),
+                prompt_range=(image_token_count, prefix_length),
                 action_range=(input_mask.shape[1] - self.action_horizon, input_mask.shape[1]),
                 query_types=self.region_guidance.query_types,
             )
@@ -358,7 +371,12 @@ class Pi0(_model.BaseModel):
         if observation.token_ar_mask is None or observation.token_loss_mask is None:
             raise ValueError("Knowledge Insulation requires FAST token and loss masks")
         observation = _model.preprocess_observation(
-            rng, observation, train=train, image_resolution=self.image_resolution
+            rng,
+            observation,
+            train=train,
+            image_resolution=self.image_resolution,
+            pad_to_square=self.pad_to_square,
+            image_resize_mode=self.image_resize_mode,
         )
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation, discrete_action_tokens=True)
         attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
@@ -376,11 +394,12 @@ class Pi0(_model.BaseModel):
                 camera_keys=self.image_token_camera_keys,
             )
             prefix_length = prefix_tokens.shape[1]
+            image_token_count = image_bias.shape[1]
             key_bias = jnp.pad(image_bias, ((0, 0), (0, prefix_length - image_bias.shape[1])))
             region_queries = _region_guidance.query_mask(
                 prefix_length,
-                image_range=(0, self.image_token_count),
-                prompt_range=(self.image_token_count, prefix_length),
+                image_range=(0, image_token_count),
+                prompt_range=(image_token_count, prefix_length),
                 query_types=self.region_guidance.query_types,
             )
             head_mask = (
@@ -408,7 +427,8 @@ class Pi0(_model.BaseModel):
         # The first image_token_count outputs correspond to image patches. The
         # remaining outputs align with the tokenized prompt and predict its next
         # token autoregressively.
-        token_hidden = prefix_out[:, self.image_token_count :]
+        image_token_count = prefix_out.shape[1] - observation.tokenized_prompt.shape[1]
+        token_hidden = prefix_out[:, image_token_count:]
         logits = self.PaliGemma.llm(token_hidden[:, :-1], method="decode")
         logp = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
         targets = observation.tokenized_prompt[:, 1:]
@@ -478,7 +498,12 @@ class Pi0(_model.BaseModel):
         rtc_delay: at.Int[at.Array, "b"] | None = None,  # noqa: F821
     ) -> _model.Actions:
         observation = _model.preprocess_observation(
-            None, observation, train=False, image_resolution=self.image_resolution
+            None,
+            observation,
+            train=False,
+            image_resolution=self.image_resolution,
+            pad_to_square=self.pad_to_square,
+            image_resize_mode=self.image_resize_mode,
         )
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.

@@ -39,12 +39,20 @@ def posemb_sincos_2d(h, w, width, temperature=10_000.0, dtype=jnp.float32):
 
 def get_posemb(self, typ, seqshape, width, name, dtype=jnp.float32):
     if typ == "learn":
-        return self.param(
+        grid = self.posemb_grid or seqshape
+        embedding = self.param(
             name,
             nn.initializers.normal(stddev=1 / np.sqrt(width)),
-            (1, np.prod(seqshape), width),
+            (1, np.prod(grid), width),
             dtype,
         )
+        if tuple(grid) != tuple(seqshape):
+            # Resize features, never source pixels. Parameter/optimizer shapes stay
+            # fixed when consecutive batches use different image resolutions.
+            embedding = jax.image.resize(
+                embedding.reshape(1, *grid, width), (1, *seqshape, width), method="linear"
+            ).reshape(1, np.prod(seqshape), width)
+        return embedding
     if typ == "sincos2d":
         return posemb_sincos_2d(*seqshape, width, dtype=dtype)
     raise ValueError(f"Unknown posemb type: {typ}")
@@ -195,6 +203,7 @@ class _Module(nn.Module):
     mlp_dim: int | None = None  # Defaults to 4x input dim
     num_heads: int = 12
     posemb: str = "learn"  # Can also be "sincos2d"
+    posemb_grid: tuple[int, int] | None = None
     rep_size: int | bool = False
     dropout: float = 0.0
     pool_type: str = "gap"  # Can also be "map" or "tok"
@@ -211,6 +220,16 @@ class _Module(nn.Module):
         # Kevin edit: do patch extraction and posemb in float32,
         # because I feel like it's a bit safer.
         image = jnp.asarray(image, jnp.float32)
+        # Keep all source pixels when the configured resolution is not divisible
+        # by the patch size (for example 640 with 14x14 patches).
+        pad_height = (-image.shape[1]) % self.patch_size[0]
+        pad_width = (-image.shape[2]) % self.patch_size[1]
+        if pad_height or pad_width:
+            image = jnp.pad(
+                image,
+                ((0, 0), (0, pad_height), (0, pad_width), (0, 0)),
+                constant_values=-1.0,
+            )
 
         # Patch extraction
         x = out["stem"] = nn.Conv(

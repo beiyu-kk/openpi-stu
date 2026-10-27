@@ -154,6 +154,8 @@ def train_step(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
         if config.training_rtc is not None:
+            if getattr(model, "rtc_action_tokens", False):
+                return model.rtc_loss(rng, observation, train=True)
             from openpi.models.training_rtc import loss_grid
 
             errors, active = model.flow_errors(rng, observation, actions, train=True, **region_kwargs)
@@ -257,6 +259,8 @@ def _record_region_guidance(config: _config.TrainConfig, *, resuming: bool):
         "guidance": dataclasses.asdict(guidance),
         "num_train_steps": config.num_train_steps,
         "image_resolution": config.model.image_resolution,
+        "pad_to_square": config.model.pad_to_square,
+        "image_resize_mode": config.model.image_resize_mode,
         "dataset_root": config.data.dataset_root,
         "annotations": "embedded",
         "annotation_mode": config.data.base_config.region_annotation_mode,
@@ -270,6 +274,9 @@ def _record_region_guidance(config: _config.TrainConfig, *, resuming: bool):
         saved = json.loads(path.read_text())
         saved.setdefault("knowledge_insulation", False)
         saved.setdefault("discrete_action_loss_weight", 1.0)
+        from openpi.training import rtc_manifest
+
+        saved = rtc_manifest.image_values(saved)
         # ``query_types`` was added after the first action-only experiments.
         # Missing metadata therefore means the dataclass default, action-only.
         saved_guidance = saved.setdefault("guidance", {})
@@ -350,7 +357,19 @@ def main(config: _config.TrainConfig):
 
     # Log images from first batch to sanity check.
     images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
+        wandb.Image(
+            np.concatenate(
+                [
+                    np.pad(
+                        np.array(img[i]),
+                        ((0, max(view.shape[1] for view in batch[0].images.values()) - img.shape[1]), (0, 0), (0, 0)),
+                        constant_values=-1.0,
+                    )
+                    for img in batch[0].images.values()
+                ],
+                axis=1,
+            )
+        )
         for i in range(min(5, len(next(iter(batch[0].images.values())))))
     ]
     wandb.log({"camera_views": images_to_log}, step=0)

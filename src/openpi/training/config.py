@@ -15,6 +15,7 @@ import tyro
 
 import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
+import openpi.models.pi0_fast as pi0_fast_model
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.piper_policy as piper_policy
 import openpi.shared.download as _download
@@ -118,6 +119,10 @@ class ModelTransformFactory(GroupFactory):
     default_prompt: str | None = None
 
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
+        resize_images = _transforms.ResizeImages(
+            *model_config.image_resolution,
+            mode="pad_to_square" if model_config.pad_to_square else model_config.image_resize_mode,
+        )
         match model_config.model_type:
             case _model.ModelType.PI0:
                 assert isinstance(model_config, pi0_config.Pi0Config)
@@ -129,7 +134,7 @@ class ModelTransformFactory(GroupFactory):
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
-                        _transforms.ResizeImages(*model_config.image_resolution),
+                        resize_images,
                         tokenizer,
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
@@ -147,7 +152,7 @@ class ModelTransformFactory(GroupFactory):
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
-                        _transforms.ResizeImages(*model_config.image_resolution),
+                        resize_images,
                         tokenizer,
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
@@ -161,10 +166,31 @@ class ModelTransformFactory(GroupFactory):
                 tokenizer_kwargs = (
                     {} if model_config.fast_model_tokenizer_kwargs is None else model_config.fast_model_tokenizer_kwargs
                 )
+                if model_config.simulated_delay is not None:
+                    from openpi.training.fast_rtc import ExtractFASTRTCActions
+                    from openpi.training.fast_rtc import TokenizeFASTRTCInputs
+
+                    tokenizer = tokenizer_cls(model_config.max_token_len, **tokenizer_kwargs)
+                    if not all(
+                        callable(getattr(tokenizer, name, None)) for name in ("tokenize_rtc", "extract_rtc_actions")
+                    ):
+                        raise ValueError("FAST RTC tokenizer must implement tokenize_rtc and extract_rtc_actions")
+                    return _transforms.Group(
+                        inputs=[
+                            _transforms.InjectDefaultPrompt(self.default_prompt),
+                            resize_images,
+                            TokenizeFASTRTCInputs(
+                                tokenizer, model_config.action_horizon, model_config.simulated_delay - 1
+                            ),
+                        ],
+                        outputs=[
+                            ExtractFASTRTCActions(tokenizer, model_config.action_horizon, model_config.action_dim)
+                        ],
+                    )
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
-                        _transforms.ResizeImages(224, 224),
+                        resize_images,
                         _transforms.TokenizeFASTInputs(
                             tokenizer_cls(model_config.max_token_len, **tokenizer_kwargs),
                         ),
@@ -445,8 +471,9 @@ def resolve_training_config(config: TrainConfig) -> TrainConfig:
         if getattr(config.model, "simulated_delay", None) is not None:
             raise ValueError("Configure RTC through TrainConfig.training_rtc, not model.simulated_delay")
         return config
-    if not isinstance(config.model, pi0_config.Pi0Config) or not config.model.pi05:
-        raise ValueError("Training RTC supports JAX pi0.5 only")
+    is_fast = isinstance(config.model, pi0_fast_model.Pi0FASTConfig)
+    if not is_fast and (not isinstance(config.model, pi0_config.Pi0Config) or not config.model.pi05):
+        raise ValueError("Training RTC supports JAX pi0.5 and pi0-FAST only")
     if config.pytorch_weight_path is not None:
         raise ValueError("Training RTC supports JAX checkpoints only")
     if rtc.max_delay >= config.model.action_horizon:
@@ -457,24 +484,39 @@ def resolve_training_config(config: TrainConfig) -> TrainConfig:
         raise ValueError("Piper RTC requires all seven delta action dimensions")
     if isinstance(config.data, LeRobotPiperDataConfig) and config.model.action_dim < 7:
         raise ValueError("Piper RTC model action_dim must be at least 7")
-    model = dataclasses.replace(
-        config.model,
-        simulated_delay=rtc.max_delay + 1,
-        simulated_delay_weights=rtc.delay_weights,
-        rtc_loss_reduction=rtc.loss_reduction,
-        rtc_time_distribution=rtc.time_distribution,
-        rtc_finetune_mode=rtc.finetune_mode,
-        paligemma_variant=(
-            config.model.paligemma_variant.removesuffix("_lora")
-            if rtc.finetune_mode == "full"
-            else config.model.paligemma_variant
-        ),
-        action_expert_variant=(
-            config.model.action_expert_variant.removesuffix("_lora")
-            if rtc.finetune_mode == "full"
-            else "gemma_300m_lora"
-        ),
-    )
+    if is_fast:
+        if rtc.loss_reduction != "official" or rtc.time_distribution != "beta":
+            raise ValueError("FAST RTC uses token cross-entropy; flow reduction/time overrides do not apply")
+        if config.model.action_dim != 7 and isinstance(config.data, LeRobotPiperDataConfig):
+            raise ValueError("Piper FAST RTC requires action_dim=7")
+        model = dataclasses.replace(
+            config.model,
+            simulated_delay=rtc.max_delay + 1,
+            simulated_delay_weights=rtc.delay_weights,
+            rtc_finetune_mode=rtc.finetune_mode,
+            paligemma_variant=(
+                config.model.paligemma_variant.removesuffix("_lora") if rtc.finetune_mode == "full" else "gemma_2b_lora"
+            ),
+        )
+    else:
+        model = dataclasses.replace(
+            config.model,
+            simulated_delay=rtc.max_delay + 1,
+            simulated_delay_weights=rtc.delay_weights,
+            rtc_loss_reduction=rtc.loss_reduction,
+            rtc_time_distribution=rtc.time_distribution,
+            rtc_finetune_mode=rtc.finetune_mode,
+            paligemma_variant=(
+                config.model.paligemma_variant.removesuffix("_lora")
+                if rtc.finetune_mode == "full"
+                else config.model.paligemma_variant
+            ),
+            action_expert_variant=(
+                config.model.action_expert_variant.removesuffix("_lora")
+                if rtc.finetune_mode == "full"
+                else "gemma_300m_lora"
+            ),
+        )
     if not isinstance(config.optimizer, _optimizer.AdamW):
         raise ValueError("RTC requires AdamW")
     adam_settings = {f.name: getattr(config.optimizer, f.name) for f in dataclasses.fields(_optimizer.AdamW)}
@@ -495,7 +537,9 @@ def resolve_training_config(config: TrainConfig) -> TrainConfig:
     # LoRA filter trains only the action side, which would silently remove the
     # discrete representation-learning signal, so keep both expert LoRA sets
     # trainable when the recipe is enabled.
-    freeze_filter = model.get_freeze_filter() if model.knowledge_insulation else model.get_rtc_freeze_filter()
+    freeze_filter = (
+        model.get_freeze_filter() if getattr(model, "knowledge_insulation", False) else model.get_rtc_freeze_filter()
+    )
     config = dataclasses.replace(
         config,
         model=model,
@@ -522,378 +566,20 @@ def prepare_rtc_base(config: TrainConfig) -> TrainConfig:
     adapters = [k for k in keys if "lora" in k]
     if config.training_rtc.finetune_mode == "full" and adapters:
         raise ValueError("Full RTC cannot discard LoRA adapters; merge them into base weights before loading")
-    if config.training_rtc.finetune_mode == "lora":
+    if config.training_rtc.finetune_mode == "lora" and not isinstance(config.model, pi0_fast_model.Pi0FASTConfig):
         vlm_lora = any(k.startswith("PaliGemma/llm/") and "_1/" not in k for k in adapters)
         model = dataclasses.replace(config.model, paligemma_variant="gemma_2b_lora" if vlm_lora else "gemma_2b")
         config = dataclasses.replace(config, model=model)
     return resolve_training_config(config)
 
 
-# Fine-tuning Piper configs.
-# Use `get_config` if you need to get a config by name in your code.
-_CONFIGS = [
-    #
-    ## Lora
-    #
+# Load recipes after the shared config types above are defined. Recipe builders
+# import these types locally, avoiding an import cycle while keeping the public
+# openpi.training.config entry point stable.
+from openpi.training.configs import pi0  # noqa: E402
+from openpi.training.configs import pi0_fast as pi0_fast_recipes  # noqa: E402
 
-    TrainConfig(
-        name="pi05_piper_lora_finetune_rtc",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=30,
-            image_resolution=(224, 224),
-            action_expert_variant="gemma_300m_lora",
-        ),
-        training_rtc=TrainingRTCConfig(finetune_mode="lora", max_delay=4),
-        data=LeRobotPiperDataConfig(base_config=DataConfig(prompt_from_task=True)),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
-        ),
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=500, peak_lr=2.5e-5, decay_steps=10000, decay_lr=2.5e-6
-        ),
-        batch_size=16,
-        num_train_steps=10000,
-        save_interval=1000,
-        keep_period=5000,
-        ema_decay=None,
-    ),
-
-    #
-    ## 原始 openpi
-    #
-
-    TrainConfig(
-        name="pi05_piper_full_finetune",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, image_resolution=(224, 224)),
-        data=LeRobotPiperDataConfig(
-            base_config=DataConfig(prompt_from_task=True),
-            use_delta_actions=True,
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
-        ),
-        batch_size=32,
-        num_train_steps=30_000,
-        log_interval=100,
-        save_interval=5000,
-        keep_period=10_000,
-        num_workers=2,
-    ),
-    TrainConfig(
-        name="pi05_piper_lora_finetune",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=30,
-            image_resolution=(224, 224),
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ),
-        data=LeRobotPiperDataConfig(
-            base_config=DataConfig(prompt_from_task=True),
-            use_delta_actions=True,
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
-        ),
-        freeze_filter=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=30,
-            image_resolution=(224, 224),
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ).get_freeze_filter(),
-        ema_decay=None,
-        batch_size=16,
-        num_train_steps=10_000,
-        log_interval=100,
-        save_interval=1000,
-        keep_period=1_000,
-    ),
-
-    #
-    ##  原始 openpi + image_448 + at3_s5
-    #
-
-    TrainConfig(
-        name="pi05_piper_ft_image448_at3_s5",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=30,
-            image_resolution=(448, 448),
-            region_guidance=pi0_config.RegionGuidanceConfig(
-                attention_bias_scale=5, query_types=("action", "image", "prompt")
-            ),
-        ),
-        data=LeRobotPiperDataConfig(base_config=DataConfig(prompt_from_task=True)),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
-        ),
-        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=500, peak_lr=1e-5, decay_steps=10000, decay_lr=1e-6),
-        batch_size=32,
-        num_train_steps=10000,
-        save_interval=1000,
-        keep_period=5000,
-        ema_decay=None,
-    ),
-
-    #
-    ##  原始 openpi + TT-RTC
-    #
-
-    # RTC is enabled only by training_rtc; the launcher needs no separate RTC flag.
-    TrainConfig(
-        name="pi05_piper_full_finetune_rtc",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=30, image_resolution=(224, 224)),
-        training_rtc=TrainingRTCConfig(finetune_mode="full", max_delay=4),
-        data=LeRobotPiperDataConfig(base_config=DataConfig(prompt_from_task=True)),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
-        ),
-        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=500, peak_lr=1e-5, decay_steps=10000, decay_lr=1e-6),
-        batch_size=32,
-        num_train_steps=10000,
-        save_interval=1000,
-        keep_period=5000,
-        ema_decay=None,
-    ),
-
-    #
-    ## openpi + TT-RTC + attention bias (action) + image_resize 448
-    #
-
-    # Full Pi0.5 RTC fine-tuning with training-only bbox attention bias.
-    # The launcher reads embedded annotations at runtime; ordinary Piper configs
-    # remain free of annotation processing and attention modifications.
-    TrainConfig(
-        name="pi05_piper_full_finetune_rtc_attention_bias",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=30,
-            image_resolution=(224, 224),
-            region_guidance=pi0_config.RegionGuidanceConfig(
-                attention_bias_scale=0.5, query_types=("action", "image", "prompt")
-            ),
-        ),
-        training_rtc=TrainingRTCConfig(finetune_mode="full", max_delay=4),
-        data=LeRobotPiperDataConfig(
-            base_config=DataConfig(prompt_from_task=True, region_annotation_mode="book"),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
-        ),
-        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=500, peak_lr=1e-5, decay_steps=10000, decay_lr=1e-6),
-        batch_size=32,
-        num_train_steps=10000,
-        save_interval=1000,
-        keep_period=5000,
-        ema_decay=None,
-    ),
-    # Separate delay-9 presets for 30 Hz deployments whose inference latency
-    # at 448x448 exceeds the original four-tick RTC window. The names include
-    # the attention-bias scale so experiments with different guidance
-    # strengths cannot be confused with one another.
-    TrainConfig(
-        name="pi05_piper_full_finetune_rtc_attention_bias_448_d9_scale_0_5",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=30,
-            image_resolution=(448, 448),
-            region_guidance=pi0_config.RegionGuidanceConfig(
-                attention_bias_scale=0.5, query_types=("action", "image", "prompt")
-            ),
-        ),
-        training_rtc=TrainingRTCConfig(
-            finetune_mode="full",
-            max_delay=9,
-            # At 30 Hz, the measured 223-232 ms round trip maps to delay 8
-            # after the client's one-tick safety margin. Delay 9 covers tail
-            # latency while delay 8 remains the most frequently sampled case.
-            delay_weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 4.0, 12.0, 6.0),
-        ),
-        data=LeRobotPiperDataConfig(
-            base_config=DataConfig(prompt_from_task=True, region_annotation_mode="book"),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
-        ),
-        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=500, peak_lr=1e-5, decay_steps=10000, decay_lr=1e-6),
-        batch_size=32,
-        num_train_steps=10000,
-        save_interval=1000,
-        keep_period=5000,
-        ema_decay=None,
-    ),
-    TrainConfig(
-        name="pi05_piper_full_finetune_rtc_attention_bias_448_d9_scale_2",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=30,
-            image_resolution=(448, 448),
-            region_guidance=pi0_config.RegionGuidanceConfig(
-                attention_bias_scale=2, query_types=("action", "image", "prompt")
-            ),
-        ),
-        training_rtc=TrainingRTCConfig(
-            finetune_mode="full",
-            max_delay=9,
-            delay_weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 4.0, 12.0, 6.0),
-        ),
-        data=LeRobotPiperDataConfig(
-            base_config=DataConfig(prompt_from_task=True, region_annotation_mode="book"),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
-        ),
-        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=500, peak_lr=1e-5, decay_steps=10000, decay_lr=1e-6),
-        batch_size=32,
-        num_train_steps=10000,
-        save_interval=1000,
-        keep_period=5000,
-        ema_decay=None,
-    ),
-    TrainConfig(
-        name="pi05_piper_full_finetune_rtc_attention_bias_448_d9_scale_5",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=30,
-            image_resolution=(448, 448),
-            region_guidance=pi0_config.RegionGuidanceConfig(
-                attention_bias_scale=5, query_types=("action", "image", "prompt")
-            ),
-        ),
-        training_rtc=TrainingRTCConfig(
-            finetune_mode="full",
-            max_delay=9,
-            delay_weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 4.0, 12.0, 6.0),
-        ),
-        data=LeRobotPiperDataConfig(
-            base_config=DataConfig(prompt_from_task=True, region_annotation_mode="book"),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
-        ),
-        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=500, peak_lr=1e-5, decay_steps=10000, decay_lr=1e-6),
-        batch_size=32,
-        num_train_steps=10000,
-        save_interval=1000,
-        keep_period=5000,
-        ema_decay=None,
-    ),
-
-    #
-    ## openpi + TT-RTC + at bias (action, image, prompt) + image_resize 448 + 2x2 merge
-    #
-
-    # 448x448 SigLIP with Qwen-style 2x2 spatial token merging.
-    TrainConfig(
-        name="pi05_piper_full_finetune_rtc_d9_r448_merge2_at_bias_s5",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=30,
-            image_resolution=(448, 448),
-            image_token_merger="spatial_2x2",
-            image_token_merge_size=2,
-            image_token_camera_keys=("base_0_rgb", "right_wrist_0_rgb"),
-            region_guidance=pi0_config.RegionGuidanceConfig(
-                attention_bias_scale=5, query_types=("action", "image", "prompt")
-            ),
-        ),
-        training_rtc=TrainingRTCConfig(
-            finetune_mode="full",
-            max_delay=9,
-            delay_weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 4.0, 12.0, 6.0),
-        ),
-        data=LeRobotPiperDataConfig(
-            base_config=DataConfig(prompt_from_task=True, region_annotation_mode="book"),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
-        ),
-        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=500, peak_lr=1e-5, decay_steps=10000, decay_lr=1e-6),
-        batch_size=32,
-        num_train_steps=10000,
-        save_interval=1000,
-        keep_period=5000,
-        ema_decay=None,
-    ),
-
-    #
-    ## openpi + TT-RTC + at bias (action, image, prompt) + image_resize 448 + 2x2 merge + KI + Fast token
-    #
-
-    TrainConfig(
-        name="pi05_piper_full_finetune_rtc_attention_bias_448_d9_scale_0_5_merge2_KI",
-        model=pi0_config.Pi0Config(
-            knowledge_insulation=True,
-            discrete_action_loss_weight=1.0,
-            pi05=True,
-            action_horizon=30,
-            image_resolution=(448, 448),
-            image_token_merger="spatial_2x2",
-            image_token_merge_size=2,
-            image_token_camera_keys=("base_0_rgb", "right_wrist_0_rgb"),
-            region_guidance=pi0_config.RegionGuidanceConfig(
-                attention_bias_scale=0.5, query_types=("action", "image", "prompt")
-            ),
-        ),
-        training_rtc=TrainingRTCConfig(
-            finetune_mode="full",
-            max_delay=9,
-            delay_weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 4.0, 12.0, 6.0),
-        ),
-        data=LeRobotPiperDataConfig(
-            base_config=DataConfig(prompt_from_task=True, region_annotation_mode="book"),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params", resize_siglip_posemb=True
-        ),
-        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=500, peak_lr=1e-5, decay_steps=10000, decay_lr=1e-6),
-        batch_size=32,
-        num_train_steps=10000,
-        save_interval=1000,
-        keep_period=5000,
-        ema_decay=None,
-    ),
-
-
-    #
-    # Debugging configs.
-    #
-    TrainConfig(
-        name="debug",
-        data=FakeDataConfig(),
-        batch_size=2,
-        model=pi0_config.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy"),
-        save_interval=100,
-        overwrite=True,
-        exp_name="debug",
-        num_train_steps=10,
-        wandb_enabled=False,
-    ),
-    TrainConfig(
-        name="debug_restore",
-        data=FakeDataConfig(),
-        batch_size=2,
-        model=pi0_config.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy"),
-        weight_loader=weight_loaders.CheckpointWeightLoader("./checkpoints/debug/debug/9/params"),
-        overwrite=True,
-        exp_name="debug",
-        num_train_steps=10,
-        wandb_enabled=False,
-    ),
-    TrainConfig(
-        name="debug_pi05",
-        model=pi0_config.Pi0Config(pi05=True, paligemma_variant="dummy", action_expert_variant="dummy"),
-        data=FakeDataConfig(),
-        batch_size=2,
-        num_train_steps=10,
-        overwrite=True,
-        exp_name="debug_pi05",
-        wandb_enabled=False,
-    ),
-]
-
+_CONFIGS = [*pi0.get_configs(), *pi0_fast_recipes.get_configs()]
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}

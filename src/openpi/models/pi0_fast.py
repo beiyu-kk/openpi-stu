@@ -1,6 +1,7 @@
 import dataclasses
 import logging
-from typing import Any
+import math
+from typing import Any, Literal
 
 import einops
 import flax.nnx as nnx
@@ -10,6 +11,7 @@ import jax.numpy as jnp
 from typing_extensions import override
 
 from openpi.models import model as _model
+from openpi.models import training_rtc as rtc
 import openpi.models.gemma_fast as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
@@ -77,6 +79,12 @@ def put_along_last_axis(arr, indices, values):
 class Pi0FASTConfig(_model.BaseModelConfig):
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
+    # Fixed input size, or position embedding reference size when pad_to_square=True.
+    image_resolution: tuple[int, int] = _model.IMAGE_RESOLUTION
+    # True: pad each image to its longest side without resizing; allow dynamic sizes.
+    pad_to_square: bool = False
+    # Fixed-canvas processing used only when pad_to_square=False.
+    image_resize_mode: Literal["resize_with_pad", "pad_only"] = "resize_with_pad"
 
     # Set the model specific defaults.
     action_dim: int = 32
@@ -87,6 +95,38 @@ class Pi0FASTConfig(_model.BaseModelConfig):
     fast_model_tokenizer: Any | None = None
     # Keyword arguments for the fast model tokenizer.
     fast_model_tokenizer_kwargs: dict[str, Any] | None = None
+    # Derived from TrainConfig.training_rtc. Delay counts action frames, never FAST tokens.
+    simulated_delay: int | None = None
+    simulated_delay_weights: tuple[float, ...] | None = None
+    rtc_finetune_mode: Literal["lora", "full"] = "full"
+
+    def __post_init__(self):
+        if (
+            len(self.image_resolution) != 2
+            or any(type(size) is not int or size <= 0 for size in self.image_resolution)
+            or self.image_resolution[0] != self.image_resolution[1]
+        ):
+            raise ValueError("image_resolution must be square with positive dimensions")
+        if type(self.pad_to_square) is not bool:
+            raise ValueError("pad_to_square must be a bool")
+        if self.image_resize_mode not in ("resize_with_pad", "pad_only"):
+            raise ValueError(
+                "image_resize_mode must be 'resize_with_pad' or 'pad_only'; use pad_to_square=True for dynamic sizes"
+            )
+        if self.simulated_delay is not None:
+            if type(self.simulated_delay) is not int or not 1 <= self.simulated_delay <= self.action_horizon:
+                raise ValueError("simulated_delay must be in [1, action_horizon]")
+            weights = self.simulated_delay_weights
+            if weights is not None and (
+                len(weights) != self.simulated_delay
+                or any(not math.isfinite(w) or w < 0 for w in weights)
+                or sum(weights) <= 0
+            ):
+                raise ValueError("Invalid FAST RTC delay weights")
+        elif self.simulated_delay_weights is not None:
+            raise ValueError("RTC weights require simulated_delay")
+        if self.rtc_finetune_mode not in ("lora", "full"):
+            raise ValueError("Unknown RTC finetune mode")
 
     @property
     @override
@@ -99,7 +139,7 @@ class Pi0FASTConfig(_model.BaseModelConfig):
 
     @override
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:
-        image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
+        image_spec = jax.ShapeDtypeStruct([batch_size, *self.image_resolution, 3], jnp.float32)
         image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
 
         with at.disable_typechecking():
@@ -119,6 +159,19 @@ class Pi0FASTConfig(_model.BaseModelConfig):
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
                 token_ar_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 token_loss_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.bool_),
+                rtc_token_inputs=(
+                    {
+                        name: jax.ShapeDtypeStruct([batch_size, self.simulated_delay, self.max_token_len], dtype)
+                        for name, dtype in (
+                            ("tokenized_prompt", jnp.int32),
+                            ("tokenized_prompt_mask", jnp.bool_),
+                            ("token_ar_mask", jnp.int32),
+                            ("token_loss_mask", jnp.bool_),
+                        )
+                    }
+                    if self.simulated_delay is not None
+                    else None
+                ),
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 
@@ -130,10 +183,24 @@ class Pi0FASTConfig(_model.BaseModelConfig):
             return nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*lora.*")))
         return nnx.Nothing
 
+    def get_rtc_freeze_filter(self) -> nnx.filterlib.Filter:
+        if self.rtc_finetune_mode == "full":
+            return nnx.Nothing
+        if "lora" not in self.paligemma_variant:
+            raise ValueError("FAST RTC LoRA requires a PaliGemma LoRA variant")
+        # FAST has one autoregressive backbone; RTC LoRA trains only its adapters.
+        return nnx.All(nnx.Param, nnx.Not(nnx_utils.PathRegex(".*lora.*")))
+
 
 class Pi0FAST(_model.BaseModel):
     def __init__(self, config: Pi0FASTConfig, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
+        self.image_resolution = config.image_resolution
+        self.pad_to_square = config.pad_to_square
+        self.image_resize_mode = config.image_resize_mode
+        self.simulated_delay = config.simulated_delay
+        self.simulated_delay_weights = config.simulated_delay_weights
+        self.rtc_action_tokens = True
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
         llm = nnx_bridge.ToNNX(
@@ -151,6 +218,11 @@ class Pi0FAST(_model.BaseModel):
                 pool_type="none",
                 scan=True,
                 dtype_mm=config.dtype,
+                **(
+                    {"posemb_grid": tuple((side + 13) // 14 for side in config.image_resolution)}
+                    if config.pad_to_square
+                    else {}
+                ),
             )
         )
         img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
@@ -198,19 +270,30 @@ class Pi0FAST(_model.BaseModel):
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
+        if self.simulated_delay is not None:
+            loss, _ = self.rtc_loss(rng, observation, train=train)
+            return jnp.broadcast_to(loss, observation.state.shape[:-1])
+        errors, mask, _ = self.token_errors(rng, observation, train=train)
+        return jnp.sum(errors, axis=-1) / jnp.maximum(jnp.sum(mask, axis=-1), 1)
+
+    def token_errors(self, rng, observation, *, train=False):
         observation = _model.preprocess_observation(
-            rng, observation, train=train, image_keys=list(observation.images.keys())
+            rng,
+            observation,
+            train=train,
+            image_keys=list(observation.images.keys()),
+            image_resolution=self.image_resolution,
+            pad_to_square=self.pad_to_square,
+            image_resize_mode=self.image_resize_mode,
         )
 
         # Compute inputs: one big forward pass of prefix + suffix at once
         input_token_embeddings, input_mask, ar_mask = self.embed_inputs(observation)
         attn_mask = make_attn_mask(input_mask, ar_mask)
 
-        # Compute one-hot targets: we predict *next* token, so shift the input tokens by one.
-        targets = jax.nn.one_hot(
-            observation.tokenized_prompt[:, 1:],
-            self.PaliGemma.llm.module.vocab_size,
-        )
+        # Predict the next token. Integer targets avoid allocating another
+        # [batch, token_length, vocabulary] tensor for the longer RTC context.
+        targets = observation.tokenized_prompt[:, 1:]
 
         # Each input predicts *next* token, so we don't input the last token.
         pre_logits, _, _ = self.PaliGemma.llm(
@@ -228,9 +311,46 @@ class Pi0FAST(_model.BaseModel):
 
         # Compute CE loss on token targets
         assert observation.token_loss_mask is not None, "Token loss mask is required"
-        loss_mask = observation.token_loss_mask[:, 1:]
-        token_pplx = jnp.sum(targets * logp, axis=-1)
-        return -jnp.sum(token_pplx * loss_mask, axis=-1) / jnp.clip(jnp.sum(loss_mask, -1), 1)
+        loss_mask = observation.token_loss_mask[:, 1:] & observation.tokenized_prompt_mask[:, 1:]
+        token_pplx = jnp.take_along_axis(logp, targets[..., None], axis=-1)[..., 0]
+        errors = jnp.where(loss_mask, -token_pplx, 0.0)
+        correct = (jnp.argmax(logits, axis=-1) == observation.tokenized_prompt[:, 1:]) & loss_mask
+        return errors, loss_mask, correct
+
+    def select_rtc_delay(self, observation, delay):
+        if self.simulated_delay is None:
+            raise ValueError("FAST RTC requires simulated_delay")
+        bank = observation.rtc_token_inputs
+        if bank is None:
+            raise ValueError("FAST RTC requires independently encoded prefix/suffix candidates")
+        batch_size = observation.state.shape[0]
+        delay = jnp.broadcast_to(jnp.asarray(delay, jnp.int32), (batch_size,))
+        values = {}
+        for name in ("tokenized_prompt", "tokenized_prompt_mask", "token_ar_mask", "token_loss_mask"):
+            if bank[name].shape != (batch_size, self.simulated_delay, self.max_token_len):
+                raise ValueError("FAST RTC token bank shape does not match the model")
+            values[name] = bank[name][jnp.arange(batch_size), delay]
+        return dataclasses.replace(observation, **values, rtc_token_inputs=None)
+
+    def rtc_loss(self, rng, observation, *, train=False):
+        if self.simulated_delay is None:
+            raise ValueError("FAST RTC requires simulated_delay")
+        delay_rng, image_rng = jax.random.split(rng)
+        delay = rtc.draw_delay(
+            delay_rng, observation.state.shape[:-1], self.simulated_delay, self.simulated_delay_weights
+        )
+        errors, active, _ = self.token_errors(image_rng, self.select_rtc_delay(observation, delay), train=train)
+        count = jnp.sum(active)
+        loss = jnp.sum(errors) / jnp.maximum(count, 1)
+        return loss, {"rtc/active_tokens": count, "rtc/token_ce": loss}
+
+    def rtc_validation_sums(self, rng, observation, actions, *, delay, raw_action_dim):
+        errors, active, correct = self.token_errors(rng, self.select_rtc_delay(observation, delay), train=False)
+        return {
+            "negative_log_likelihood": jnp.sum(errors),
+            "active_tokens": jnp.sum(active),
+            "correct_tokens": jnp.sum(correct),
+        }
 
     @override
     def sample_actions(
@@ -243,7 +363,13 @@ class Pi0FAST(_model.BaseModel):
     ) -> _model.Actions:
         # TODO: this is a hack to get the image keys.
         observation = _model.preprocess_observation(
-            None, observation, train=False, image_keys=list(observation.images.keys())
+            None,
+            observation,
+            train=False,
+            image_keys=list(observation.images.keys()),
+            image_resolution=self.image_resolution,
+            pad_to_square=self.pad_to_square,
+            image_resize_mode=self.image_resize_mode,
         )
 
         # embed inputs

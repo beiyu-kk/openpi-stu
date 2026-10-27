@@ -51,9 +51,18 @@ def validate_embedded_annotations(dataset_root: str | Path) -> int:
     return len(paths)
 
 
-def resize_mask(mask: np.ndarray, height: int, width: int) -> np.ndarray:
+def resize_mask(mask: np.ndarray, height: int, width: int, *, image_resize_mode: str = "resize_with_pad") -> np.ndarray:
     """Match ``ResizeImages`` geometry, retaining fractional mask coverage."""
     source_height, source_width = mask.shape
+    if image_resize_mode in ("pad_only", "pad_to_square"):
+        if source_height > height or source_width > width:
+            raise ValueError("Region mask exceeds padding target; pad-only mode never resizes")
+        top, left = (height - source_height) // 2, (width - source_width) // 2
+        result = np.zeros((height, width), dtype=np.float32)
+        result[top : top + source_height, left : left + source_width] = mask
+        return result
+    if image_resize_mode != "resize_with_pad":
+        raise ValueError(f"Unknown image resize mode: {image_resize_mode}")
     if (source_height, source_width) == (height, width):
         return mask.astype(np.float32)
     ratio = max(source_width / width, source_height / height)
@@ -126,10 +135,11 @@ def _selected_boxes(row: dict, mode: RegionMode) -> list:
 class RegionAnnotatedDataset:
     """Attach masks from bbox fields already present in each source sample."""
 
-    def __init__(self, dataset, transform, mode: RegionMode = "book"):
+    def __init__(self, dataset, transform, mode: RegionMode = "book", *, image_resize_mode: str = "resize_with_pad"):
         self._dataset = dataset
         self._transform = transform
         self._mode = mode
+        self._image_resize_mode = image_resize_mode
 
     def __len__(self):
         return len(self._dataset)
@@ -165,7 +175,9 @@ class RegionAnnotatedDataset:
         for camera, image in result["image"].items():
             height, width = image.shape[:2]
             if camera in regions:
-                result["region_masks"][camera] = resize_mask(regions[camera], height, width)
+                result["region_masks"][camera] = resize_mask(
+                    regions[camera], height, width, image_resize_mode=self._image_resize_mode
+                )
                 result["region_valid"][camera] = valid[camera]
             else:
                 result["region_masks"][camera] = np.zeros((height, width), dtype=np.float32)
